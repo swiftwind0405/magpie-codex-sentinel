@@ -11,6 +11,8 @@ let seenJob = null;
 let submitting = false;
 let connectionLost = false;
 let defaults = {};
+let viewedRun = null;
+let seenResults = '';
 const selected = new Set();
 const isActive = () => job && ['running', 'cancelling'].includes(job.status);
 const profile = () => document.querySelector('input[name="profile"]:checked').value;
@@ -35,12 +37,21 @@ function controls() {
   $('run-fields').disabled = busy;
   $('start').disabled = busy || !models.length || !$('account').value;
   $('start').innerHTML = busy ? '检测进行中…' : `开始${labels[profile()] === '快速初筛' ? '快速检测' : labels[profile()]} <span aria-hidden="true">↗</span>`;
+  $('start-all').disabled = busy || !models.length || !accounts.length;
+  $('start-all').textContent = `全部检测 · ${accounts.length} 个账号`;
+  $('refresh-accounts').disabled = busy;
   $('cancel').hidden = !isActive();
   $('cancel').disabled = job?.status === 'cancelling';
-  $('cancel').textContent = job?.status === 'cancelling' ? '正在停止并保存结果…' : '停止本轮检测';
+  $('cancel').textContent = job?.status === 'cancelling' ? '正在停止并保存结果…' : job?.scope === 'all' ? '停止全部检测' : '停止本轮检测';
+  $('back-progress').hidden = !isActive() || !viewedRun;
+  if (job?.scope === 'all') {
+    $('run-state').textContent = job.status === 'cancelling' ? '批次正在停止' : isActive() ? '批次检测中' : job.cancelled ? '批次已停止' : job.status === 'failed' ? '批次异常结束' : '批次已结束';
+  }
   $('baseline').disabled = busy || selected.size < 3;
   $('selected-count').textContent = selected.size;
   $('run-hint').textContent = profile() === 'fingerprint' ? '发送 3 次采样请求，候选相似度不能证明模型身份。' : `点击后最多发送 ${profile() === 'quick' ? 6 : 18} 次独立请求，使用所选通道的额度。`;
+  const perAccount = profile() === 'fingerprint' ? 3 : profile() === 'quick' ? 6 : 18;
+  $('batch-hint').textContent = `${labels[profile()]}：${accounts.length} 个账号 × ${perAccount} 次，最多 ${accounts.length * perAccount} 次测试请求。逐个检测，单个账号失败后继续；结果分别保存。`;
 }
 
 function efforts(preferred = $('effort').value) {
@@ -82,7 +93,7 @@ function accountCards() {
 async function loadAccounts() {
   try {
     const data = await api('/api/accounts');
-    accounts = data.accounts;
+    accounts = [...new Map(data.accounts.map((account) => [account.id, account])).values()];
     let saved = {};
     try { saved = JSON.parse(localStorage.getItem('sentinel-selection')) || {}; } catch { /* Use defaults. */ }
     const preferred = isActive() ? job.accountId : $('account').value || saved.accountId || defaults.accountId;
@@ -141,6 +152,24 @@ function showProgress() {
   }));
 }
 
+function renderBatch() {
+  $('batch-results').hidden = job?.scope !== 'all';
+  if (job?.scope !== 'all') { return; }
+  const done = job.accounts.filter((item) => !['queued', 'running', 'skipped'].includes(item.status)).length;
+  const state = job.status === 'cancelling' ? '正在停止' : isActive() ? '进行中' : job.cancelled ? '已停止' : job.status === 'failed' ? '异常结束' : '已结束';
+  $('batch-title').textContent = `全部账号${labels[job.profile]} · ${state}`;
+  const completed = job.accounts.filter((item) => item.status === 'completed').length;
+  const skipped = job.accounts.filter((item) => item.status === 'skipped').length;
+  $('batch-status').textContent = `已处理 ${done} / ${job.accounts.length} 个账号，完成检测 ${completed} 个${skipped ? `，未开始 ${skipped} 个` : ''}。${job.error || '各账号独立判定，完成检测不代表已证明能力正常。'}`;
+  const names = { queued: '等待检测', running: '正在检测', completed: '已完成', incomplete: '未完整完成', cancelled: '已取消', failed: '启动失败', skipped: '未开始' };
+  $('batch-body').innerHTML = job.accounts.map((item) => {
+    const result = item.error || (item.summary ? job.profile === 'fingerprint'
+      ? `${item.fingerprint?.acceptedSamples || 0}/3 有效样本`
+      : `${scoreText(item)} · ${item.verdict.label}` : '');
+    return `<tr><td>${esc(item.accountName)}</td><td>${esc(names[item.status] || item.status)}<small>${esc(result)}</small>${item.persisted === false ? '<small class="unsaved">保存失败，请导出报告</small>' : ''}</td><td>${item.reportId ? `<button type="button" class="text-button" data-view="${esc(item.reportId)}">查看</button>` : '—'}</td></tr>`;
+  }).join('');
+}
+
 function date(value) {
   return value ? new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }) : '—';
 }
@@ -164,8 +193,10 @@ function renderReport(report) {
 async function showRun(id) {
   try {
     const report = await api(`/api/runs/${encodeURIComponent(id)}`);
+    viewedRun = isActive() && job.scope !== 'all' ? null : id;
     renderReport(report);
     $('report').querySelector('.report-meta').prepend(`${accountName(report.config?.accountId, report.config?.accountHint)} · `);
+    controls();
   }
   catch (error) { notice(error.message); }
 }
@@ -193,24 +224,31 @@ async function syncState() {
   const state = await api('/api/state');
   if (connectionLost) { connectionLost = false; notice(''); }
   job = state.job;
+  renderBatch();
   if (isActive()) {
     if (seenJob !== job.id) {
       seenJob = job.id;
+      viewedRun = null;
       document.querySelector(`input[name="profile"][value="${job.profile}"]`).checked = true;
       $('model').value = job.target;
       $('account').value = job.accountId;
       efforts(job.effort);
       $('seed').value = job.seed;
     }
-    showProgress();
+    if (!viewedRun) { showProgress(); }
+    if (job.scope === 'all') {
+      const results = `${job.id}:${job.accounts.filter((item) => item.reportId).length}`;
+      if (seenResults !== results) { seenResults = results; await history(); }
+    }
   } else if (job && seenJob !== `${job.id}:finished`) {
+    if (seenJob !== job.id) { viewedRun = null; }
     seenJob = `${job.id}:finished`;
-    if (job.reportId) { await showRun(job.reportId); }
+    if (job.reportId) { await showRun(viewedRun || job.reportId); }
     else {
       $('progress').hidden = true;
-      $('empty-result').hidden = false;
-      $('run-state').textContent = '启动失败';
-      notice(job.error || '检测未完成。');
+      $('empty-result').hidden = job.scope === 'all';
+      $('run-state').textContent = job.cancelled ? '已停止' : '启动失败';
+      if (!job.cancelled) { notice(job.error || '检测未完成。'); }
     }
     await history();
   }
@@ -226,16 +264,23 @@ $('run-form').addEventListener('submit', async (event) => {
   controls();
   remember();
   try {
-    const result = await api('/api/runs', { accountId: $('account').value, target: $('model').value, effort: $('effort').value, profile: profile(), seed: $('seed').value });
+    const accountChoice = event.submitter?.id === 'start-all' ? { accountIds: accounts.map((account) => account.id) } : { accountId: $('account').value };
+    const result = await api('/api/runs', { ...accountChoice, target: $('model').value, effort: $('effort').value, profile: profile(), seed: $('seed').value });
     job = result.job;
     seenJob = job.id;
+    viewedRun = null;
+    renderBatch();
     if (isActive()) { showProgress(); }
     else { await syncState(); }
   } catch (error) { notice(error.message); }
   finally { submitting = false; controls(); }
 });
+$('batch-body').addEventListener('click', (event) => {
+  if (event.target.dataset.view) { showRun(event.target.dataset.view); }
+});
+$('back-progress').addEventListener('click', () => { viewedRun = null; showProgress(); controls(); });
 $('cancel').addEventListener('click', async () => {
-  try { const result = await api('/api/cancel', { id: job.id }); job = result.job; controls(); }
+  try { const result = await api('/api/cancel', { id: job.id }); job = result.job; renderBatch(); controls(); }
   catch (error) { notice(error.message); }
 });
 $('refresh-models').addEventListener('click', () => { notice(''); loadModels(); });

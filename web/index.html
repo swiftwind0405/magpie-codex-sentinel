@@ -44,13 +44,21 @@
             <details class="advanced"><summary>复现设置</summary><label class="field-label" for="seed">题目种子</label><input id="seed" name="seed" maxlength="200" required value="sentinel-v1-reference"><p>保持相同模型、档位和种子，结果才可比较。</p></details>
           </fieldset>
           <button id="start" class="primary" type="submit" disabled>开始快速检测 <span aria-hidden="true">↗</span></button>
-          <button id="cancel" class="secondary cancel" type="button" hidden>停止本轮检测</button>
           <p id="run-hint" class="hint">仅在点击后发送测试题，使用所选通道的额度。</p>
+          <button id="start-all" class="secondary start-all" type="submit" disabled>全部检测</button>
+          <p id="batch-hint" class="hint">按当前检测类型，依次检测所有 Codex 账号。</p>
+          <button id="cancel" class="secondary cancel" type="button" hidden>停止本轮检测</button>
         </form>
         <div class="gateway"><span>已连接的网关</span><code id="gateway-address">127.0.0.1:3425</code><small>使用 Magpie 已有的模型连接，无需再次登录供应商。</small></div>
       </section>
       <section class="panel results" aria-labelledby="result-title">
         <div class="panel-heading"><h2 id="result-title">检测结果</h2><span id="run-state" class="badge">尚未开始</span></div>
+        <section id="batch-results" class="batch-results" aria-labelledby="batch-title" hidden>
+          <h3 id="batch-title">全部账号检测</h3>
+          <p id="batch-status" class="hint" role="status"></p>
+          <div class="table-scroll"><table><thead><tr><th scope="col">账号</th><th scope="col">状态与结果</th><th scope="col">报告</th></tr></thead><tbody id="batch-body"></tbody></table></div>
+          <button id="back-progress" class="text-button" type="button" hidden>返回当前检测进度</button>
+        </section>
         <div id="empty-result" class="empty-result">
           <div class="signal" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
           <h3>从一次快速检测开始</h3>

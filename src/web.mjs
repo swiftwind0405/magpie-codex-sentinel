@@ -63,6 +63,37 @@ export async function startDashboard({ options = {}, directory, apiKey, port = 4
     catch (error) { throw failure(404, cleanError(error)); }
   };
 
+  async function executeJob(current, runOptions, signal) {
+    const run = current.profile === 'fingerprint' ? runFingerprint : runEvaluation;
+    for (const item of current.accounts) {
+      if (signal.aborted) { break; }
+      current.accountId = item.accountId;
+      current.accountName = item.accountName;
+      current.messages = [];
+      item.status = 'running';
+      try {
+        const report = await run({ ...common, options: { ...runOptions, account: item.accountName }, profile: current.profile, signal,
+          onProgress: ({ message }) => { current.messages.push(message); } });
+        current.report = report;
+        Object.assign(item, { status: report.runStatus, reportId: report.id, summary: report.summary, verdict: report.verdict, fingerprint: report.fingerprint, persisted: report.persisted });
+        if (!report.persisted) {
+          current.error = '结果保存失败，已停止后续账号。请先导出未保存的报告。';
+          break;
+        }
+      } catch (error) {
+        item.status = 'failed';
+        item.error = cleanError(error);
+      }
+    }
+    for (const item of current.accounts) {
+      if (item.status === 'queued') { item.status = 'skipped'; }
+    }
+    current.cancelled = signal.aborted;
+    current.status = current.error || current.accounts.every((item) => item.status === 'failed') ? 'failed' : 'done';
+    current.error ||= current.scope === 'single' ? current.accounts[0].error : undefined;
+    current.completedAt = new Date().toISOString();
+  }
+
   const server = createServer((request, response) => {
     handle(request, response).catch((error) => {
       if (!response.headersSent) { send(response, error.status || 500, { error: cleanError(error) }); }
@@ -136,13 +167,25 @@ export async function startDashboard({ options = {}, directory, apiKey, port = 4
       if (!['quick', 'standard', 'fingerprint'].includes(body.profile)) { throw failure(400, '请选择有效的检测类型。'); }
       if (typeof body.target !== 'string' || !body.target.trim()) { throw failure(400, '请选择要检测的模型。'); }
       if (!body.target.startsWith('codex/')) { throw failure(400, '账号检测只接受 Codex provider 下的模型。'); }
-      if (typeof body.accountId !== 'string' || !body.accountId) { throw failure(400, '请选择一个 Codex 账号，检测不能使用自动路由。'); }
+      const allAccounts = body.accountIds !== undefined;
+      if (allAccounts) {
+        if (!Array.isArray(body.accountIds) || !body.accountIds.length || body.accountIds.some((id) => typeof id !== 'string' || !id)
+          || new Set(body.accountIds).size !== body.accountIds.length || body.accountId !== undefined) {
+          throw failure(400, '全部检测需要完整且不重复的账号列表，请刷新账号。');
+        }
+      } else if (typeof body.accountId !== 'string' || !body.accountId) { throw failure(400, '请选择一个 Codex 账号，检测不能使用自动路由。'); }
       let accounts;
       try { accounts = await fetchAccounts(config); }
       catch (error) { throw failure(502, cleanError(error)); }
-      const account = accounts.find((row) => row.id === body.accountId);
-      if (!account) { throw failure(400, '该账号已不在 Codex 列表中，请刷新账号。'); }
-      const runOptions = { ...options, target: body.target, account: account.name, effort: body.effort ?? config.effort };
+      // Freeze exactly the accounts shown before the click; never silently add
+      // newly discovered accounts to a batch with a different request budget.
+      accounts = [...new Map(accounts.map((account) => [account.id, account])).values()];
+      if (allAccounts && (accounts.length !== body.accountIds.length || accounts.some((account) => !body.accountIds.includes(account.id)))) {
+        throw failure(400, 'Codex 账号列表已变化，请刷新账号后再开始全部检测。');
+      }
+      const chosen = allAccounts ? body.accountIds.map((id) => accounts.find((account) => account.id === id)) : accounts.filter((account) => account.id === body.accountId);
+      if (!chosen.length) { throw failure(400, '该账号已不在 Codex 列表中，请刷新账号。'); }
+      const runOptions = { ...options, target: body.target, account: chosen[0].name, effort: body.effort ?? config.effort };
       if (body.seed !== undefined) { runOptions.seed = body.seed; }
       try { normalizeOptions(runOptions, { directory, apiKey: config.apiKey }); }
       catch (error) { throw failure(400, cleanError(error)); }
@@ -150,12 +193,10 @@ export async function startDashboard({ options = {}, directory, apiKey, port = 4
       if (active()) { throw failure(409, '已有检测正在运行，请等待完成或先停止。'); }
       if (closing) { throw failure(503, '检测服务正在关闭。'); }
       controller = new AbortController();
-      job = { id: randomUUID(), status: 'running', accountId: account.id, accountName: account.name, target: runOptions.target, effort: runOptions.effort, seed: runOptions.seed ?? config.seed, profile: body.profile, startedAt: new Date().toISOString(), messages: [] };
-      const current = job;
-      const run = body.profile === 'fingerprint' ? runFingerprint : runEvaluation;
-      pending = run({ ...common, options: runOptions, profile: body.profile, signal: controller.signal, onProgress: ({ message }) => { current.messages.push(message); } })
-        .then((report) => { current.report = report; current.status = 'done'; })
-        .catch((error) => { current.status = 'failed'; current.error = cleanError(error); });
+      job = { id: randomUUID(), scope: allAccounts ? 'all' : 'single', status: 'running', accountId: chosen[0].id, accountName: chosen[0].name,
+        accounts: chosen.map((account) => ({ accountId: account.id, accountName: account.name, status: 'queued' })),
+        target: runOptions.target, effort: runOptions.effort, seed: runOptions.seed ?? config.seed, profile: body.profile, startedAt: new Date().toISOString(), messages: [] };
+      pending = executeJob(job, runOptions, controller.signal);
       send(response, 202, { job: snapshot() });
       return;
     }

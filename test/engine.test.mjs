@@ -29,7 +29,7 @@ async function fixture(t) {
   const directory = await mkdtemp(join(tmpdir(), 'sentinel-e2e-'));
   const answers = new Map(buildSuite({ profile: 'standard', seed }).map((c) => [c.prompt, c.expected]));
   const state = { calls: [], sessions: new Map(), wrong: false, errorStatus: null, member: model, routePending: false, routeReads: 0, tools: false,
-    events: null, json: null, text: null, hang: false, routeStatus: 200, gatewayVersion: '0.1.1132',
+    events: null, json: null, text: null, hang: false, hangAccount: null, accountErrors: new Map(), routeStatus: 200, gatewayVersion: '0.1.1132',
     accounts: [{ provider: 'codex', user: 'private@example.test', plan: 'test', windows: [] }, { provider: 'codex', user: 'second@example.test', plan: 'test', windows: [] }] };
   const server = createServer(async (request, response) => {
     try {
@@ -52,8 +52,10 @@ async function fixture(t) {
       if (url.pathname !== '/v1/responses') { response.writeHead(404).end(); return; }
       let raw = ''; for await (const chunk of request) raw += chunk;
       const body = JSON.parse(raw); state.calls.push({ body, headers: request.headers });
-      if (state.hang) { return; }
-      if (state.errorStatus) { response.writeHead(state.errorStatus, { 'content-type': 'application/json' }); response.end('{"error":{"message":"fixture error"}}'); return; }
+      const account = Buffer.from(request.headers['x-magpie-account'] || '', 'latin1').toString('utf8');
+      if (state.hang || state.hangAccount === account) { return; }
+      const errorStatus = state.accountErrors.get(account) || state.errorStatus;
+      if (errorStatus) { response.writeHead(errorStatus, { 'content-type': 'application/json' }); response.end('{"error":{"message":"fixture error"}}'); return; }
       state.sessions.set(request.headers['x-magpie-session'], { model: state.member });
       if (state.json) {
         response.writeHead(200, { 'content-type': 'application/json' });
@@ -248,10 +250,16 @@ test('cancelling after the last scored answer prevents decline verdicts and base
   await assert.rejects(setBaseline({ ...f.args, runIds: [references[0].id, references[1].id, report.id] }), /完整完成/);
 });
 
-test('oversized run writes keep the readable checkpoint and report failure instead of persisting unreadable JSON', async (t) => {
+test('oversized batch run keeps the readable checkpoint and exportable result and stops queued accounts', async (t) => {
   const f = await fixture(t);
   f.state.text = JSON.stringify({ answer: 'x'.repeat(3 * 1024 * 1024) });
-  const report = await runEvaluation({ ...f.args, profile: 'standard' });
+  const d = await dashboard(t, f);
+  assert.equal((await d.request('/api/runs', { target: model, profile: 'standard', accountIds: d.accounts.map((account) => account.id) })).status, 202);
+  const job = await d.finished();
+  assert.equal(job.status, 'failed');
+  assert.deepEqual(job.accounts.map((item) => item.status), ['incomplete', 'skipped']);
+  assert.ok(f.state.calls.every((call) => call.headers['x-magpie-account'] === d.accounts[0].name));
+  const report = await (await d.request(`/api/runs/${job.reportId}/export?format=json`)).json();
   assert.equal(report.persisted, false);
   assert.equal(report.runStatus, 'incomplete');
   assert.equal(report.verdict.code, 'incomplete');
@@ -410,6 +418,119 @@ test('dashboard baseline selection writes a reusable reference and preserves all
   assert.equal(response.status, 200);
   assert.deepEqual((await readBaseline(join(f.directory, 'codex-sentinel'), runs[0].comparisonKey)).runIds, ids);
   for (const run of runs) { assert.deepEqual(await getRun({ ...f.args, id: run.id }), run); }
+});
+
+test('all-account dashboard run completes one standard check per account with separate saved reports', async (t) => {
+  const f = await fixture(t);
+  const d = await dashboard(t, f);
+  const accountIds = d.accounts.map((account) => account.id);
+  assert.equal((await d.request('/api/runs', { target: model, profile: 'standard', effort: 'high', seed, accountIds })).status, 202);
+  const job = await d.finished();
+  assert.equal(job.scope, 'all');
+  assert.equal(job.status, 'done');
+  assert.deepEqual(job.accounts.map((item) => item.status), ['completed', 'completed']);
+  assert.deepEqual(f.state.calls.map((call) => call.headers['x-magpie-account']),
+    [...Array(18).fill(d.accounts[0].name), ...Array(18).fill(d.accounts[1].name)]);
+  const reports = await Promise.all(job.accounts.map((item) => getRun({ ...f.args, id: item.reportId })));
+  assert.deepEqual(reports.map((report) => report.config.accountId), accountIds);
+  assert.equal(new Set(reports.map((report) => report.comparisonKey)).size, 2);
+  for (const report of reports) {
+    assert.equal(report.profile, 'standard');
+    assert.equal(report.config.target, model);
+    assert.equal(report.config.effort, 'high');
+    assert.equal(report.config.seed, seed);
+    assert.equal(report.cases.length, 18);
+    assert.equal(report.persisted, true);
+    assert.equal(report.verdict.code, 'no_baseline', 'Running every account must not create a baseline or declare health');
+    assert.deepEqual(await (await d.request(`/api/runs/${report.id}`)).json(), report);
+  }
+  const { runs } = await (await d.request('/api/history')).json();
+  assert.deepEqual(new Set(runs.map((run) => run.id)), new Set(reports.map((report) => report.id)));
+});
+
+test('all-account dashboard run continues after quota and authentication failures without switching account', async (t) => {
+  const f = await fixture(t);
+  f.state.accounts.push({ provider: 'codex', user: 'third@example.test · 团队', plan: 'test', windows: [] });
+  f.state.accountErrors.set(f.state.accounts[0].user, 429);
+  f.state.accountErrors.set(f.state.accounts[1].user, 401);
+  const d = await dashboard(t, f);
+  assert.equal((await d.request('/api/runs', { target: model, profile: 'quick', accountIds: d.accounts.map((account) => account.id) })).status, 202);
+  const job = await d.finished();
+  assert.deepEqual(job.accounts.map((item) => item.status), ['incomplete', 'incomplete', 'completed']);
+  assert.deepEqual(f.state.calls.map((call) => Buffer.from(call.headers['x-magpie-account'], 'latin1').toString('utf8')),
+    [d.accounts[0].name, d.accounts[1].name, ...Array(6).fill(d.accounts[2].name)]);
+  for (const [index, status] of ['rate_limited', 'auth_error'].entries()) {
+    const report = await getRun({ ...f.args, id: job.accounts[index].reportId });
+    assert.equal(report.config.accountId, d.accounts[index].id);
+    assert.equal(report.cases.length, 1);
+    assert.equal(report.cases[0].status, status);
+    assert.equal(report.summary.usable, 0);
+    assert.equal(report.verdict.code, 'incomplete');
+  }
+  assert.equal((await getRun({ ...f.args, id: job.accounts[2].reportId })).cases.length, 6);
+});
+
+test('all-account fingerprint run preserves its separate three-sample contract for each account', async (t) => {
+  const f = await fixture(t);
+  const d = await dashboard(t, f);
+  assert.equal((await d.request('/api/runs', { target: model, profile: 'fingerprint', accountIds: d.accounts.map((account) => account.id) })).status, 202);
+  const job = await d.finished();
+  assert.deepEqual(f.state.calls.map((call) => call.headers['x-magpie-account']),
+    [...Array(3).fill(d.accounts[0].name), ...Array(3).fill(d.accounts[1].name)]);
+  for (const item of job.accounts) {
+    const report = await getRun({ ...f.args, id: item.reportId });
+    assert.equal(report.kind, 'fingerprint');
+    assert.equal(report.cases.length, 3);
+    assert.equal(report.config.accountId, item.accountId);
+    assert.equal(Object.hasOwn(report, 'verdict'), false);
+  }
+});
+
+test('stopping an all-account run retains finished reports, cancels the current account and never starts queued accounts', async (t) => {
+  const f = await fixture(t);
+  f.state.accounts.push({ provider: 'codex', user: 'third@example.test', plan: 'test', windows: [] });
+  f.state.hangAccount = f.state.accounts[1].user;
+  const d = await dashboard(t, f);
+  const body = { target: model, profile: 'quick', accountIds: d.accounts.map((account) => account.id) };
+  const started = await (await d.request('/api/runs', body)).json();
+  for (let i = 0; i < 200 && f.state.calls.length < 7; i++) { await new Promise((resolve) => setTimeout(resolve, 10)); }
+  assert.equal(f.state.calls.length, 7);
+  assert.equal((await d.request('/api/runs', body)).status, 409);
+  assert.equal((await d.request('/api/runs', { target: model, profile: 'quick', accountId: d.accounts[0].id })).status, 409);
+  f.state.accounts.push({ provider: 'codex', user: 'new@example.test', windows: [] });
+  const refreshed = await (await d.request('/api/state')).json();
+  assert.equal(refreshed.job.id, started.job.id);
+  assert.deepEqual(refreshed.job.accounts.map((item) => item.status), ['completed', 'running', 'queued']);
+  assert.equal((await d.request('/api/cancel', { id: 'wrong-job' })).status, 409);
+  assert.equal((await d.request('/api/cancel', { id: started.job.id })).status, 202);
+  const job = await d.finished();
+  assert.equal(job.cancelled, true);
+  assert.deepEqual(job.accounts.map((item) => item.status), ['completed', 'cancelled', 'skipped']);
+  assert.equal(f.state.calls.length, 7);
+  assert.equal((await getRun({ ...f.args, id: job.accounts[0].reportId })).runStatus, 'completed');
+  const cancelled = await getRun({ ...f.args, id: job.accounts[1].reportId });
+  assert.equal(cancelled.runStatus, 'cancelled');
+  assert.equal(cancelled.config.accountId, d.accounts[1].id);
+  const { runs } = await (await d.request('/api/history')).json();
+  assert.equal(runs.length, 2);
+  assert.equal(job.accounts[2].reportId, undefined);
+  f.state.hangAccount = null;
+  assert.equal((await d.request('/api/runs', { target: model, profile: 'quick', accountId: d.accounts[2].id })).status, 202);
+  assert.equal((await d.finished()).accounts[0].status, 'completed');
+});
+
+test('all-account run rejects empty, duplicate and changed lists before any probe', async (t) => {
+  const f = await fixture(t);
+  const d = await dashboard(t, f);
+  const ids = d.accounts.map((account) => account.id);
+  for (const accountIds of [[], [ids[0], ids[0]], [ids[0]], [ids[0], 'unknown'], null]) {
+    assert.equal((await d.request('/api/runs', { target: model, profile: 'quick', accountIds })).status, 400);
+  }
+  f.state.accounts.pop();
+  assert.equal((await d.request('/api/runs', { target: model, profile: 'quick', accountIds: ids })).status, 400);
+  f.state.accounts = [];
+  assert.equal((await d.request('/api/runs', { target: model, profile: 'quick', accountIds: [] })).status, 400);
+  assert.equal(f.state.calls.length, 0);
 });
 
 test('account selection pins the named account, separates history and rejects mixed-account baselines', async (t) => {
