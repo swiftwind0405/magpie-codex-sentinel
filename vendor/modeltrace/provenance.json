@@ -1,0 +1,87 @@
+{
+  "schema": "magpie-codex-sentinel-modeltrace-snapshot-v1",
+  "repository": "https://github.com/xqy2006/ModelTrace",
+  "commit": "d4131b30243dfa05e70180b5eedde742103f1d73",
+  "commitDate": "2026-09-30T22:09:42Z",
+  "retrievedAt": "2026-10-09T05:41:05Z",
+  "license": "MIT",
+  "copyright": "Copyright (c) 2026 xqy2006",
+  "bankBuiltAt": "2026-09-30T22:05:57.774800+00:00",
+  "modelCount": 17,
+  "referenceResponseCount": 612,
+  "referenceIntegerCount": 183656,
+  "files": {
+    "fingerprint-core.js": {
+      "upstreamPath": "static/fingerprint-core.js",
+      "url": "https://github.com/xqy2006/ModelTrace/blob/d4131b30243dfa05e70180b5eedde742103f1d73/static/fingerprint-core.js",
+      "sha256": "83fa5bd611e18f8339122582335123c8ea168ed242298bb31f4e363abeeb6e4a",
+      "bytes": 8988,
+      "modified": false
+    },
+    "unified_bank.json": {
+      "upstreamPath": "data/unified_bank.json",
+      "url": "https://github.com/xqy2006/ModelTrace/blob/d4131b30243dfa05e70180b5eedde742103f1d73/data/unified_bank.json",
+      "sha256": "e514c76928ea38d23bc0f14d3935f23c97b1efb6d96b18a19bdc88ad2d830536",
+      "bytes": 882659,
+      "modified": false
+    },
+    "LICENSE": {
+      "upstreamPath": "LICENSE",
+      "url": "https://github.com/xqy2006/ModelTrace/blob/d4131b30243dfa05e70180b5eedde742103f1d73/LICENSE",
+      "sha256": "238afb57e498990742f84b9ce6167b4e256ac06104a9938ce953bc41c14bea51",
+      "bytes": 1064,
+      "modified": false
+    },
+    "challenge_suite.py": {
+      "upstreamPath": "challenge_suite.py",
+      "url": "https://github.com/xqy2006/ModelTrace/blob/d4131b30243dfa05e70180b5eedde742103f1d73/challenge_suite.py",
+      "sha256": "aeebf20878ce11864c5cb7b1f6c0c7c2cf6dcfbb934244ff868b369e08a15032",
+      "bytes": 7010,
+      "modified": false
+    },
+    "upstream-provenance.json": {
+      "upstreamPath": "codex-plugin/modeltrace-guard/assets/provenance.json",
+      "url": "https://github.com/xqy2006/ModelTrace/blob/d4131b30243dfa05e70180b5eedde742103f1d73/codex-plugin/modeltrace-guard/assets/provenance.json",
+      "sha256": "fcd38982bb7a372cd467922984f9669c7a700c1963e2b54292431c1817543c2b",
+      "bytes": 639,
+      "modified": false
+    },
+    "probe-output.mjs": {
+      "upstreamPath": "codex-plugin/modeltrace-guard/scripts/probe-output.mjs",
+      "url": "https://github.com/xqy2006/ModelTrace/blob/d4131b30243dfa05e70180b5eedde742103f1d73/codex-plugin/modeltrace-guard/scripts/probe-output.mjs",
+      "sha256": "f35e72b5fe82ce5037980d890fbdcfb3979ee31357f195f5fafc1e099a02c5d6",
+      "bytes": 2423,
+      "modified": false
+    }
+  },
+  "promptProtocol": {
+    "source": "https://github.com/xqy2006/ModelTrace/blob/d4131b30243dfa05e70180b5eedde742103f1d73/challenge_suite.py",
+    "condition": "environment-06",
+    "transport": "clean",
+    "system": "",
+    "userPrefix": "",
+    "style": "json",
+    "language": "en",
+    "challengeIds": [
+      "query-16",
+      "query-17",
+      "query-18"
+    ],
+    "expectedCounts": [
+      301,
+      319,
+      327
+    ],
+    "derivedFile": "reference-probes.json",
+    "derivedFileSha256": "2ef66463a11513c6fa5222be7a25e3a98a05071eff6c139491068f5e56c7d12d",
+    "derivation": "Exact fingerprint_suite() rows with condition == environment-06; prompt text unchanged.",
+    "seedPolicy": "Seed only selects a deterministic permutation of these three unchanged reference prompts and their local IDs. It is not included in model input and does not seed model-generated numbers."
+  },
+  "calibration": {
+    "scope": "upstream_reference_grouped_cross_validation_only",
+    "sameContextCalibrated": false,
+    "multilingualCalibrated": false,
+    "magpieTransportCalibrated": false,
+    "newConversationDoesNotAuthenticateExistingTask": true
+  }
+}

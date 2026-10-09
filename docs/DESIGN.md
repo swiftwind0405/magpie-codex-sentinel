@@ -1,0 +1,161 @@
+# Codex Sentinel 设计说明
+
+## 1. 要检测的对象
+
+本插件观察的是：**某条 Magpie 路由在固定设置与固定题目上的当前表现，是否持续低于用户选定的历史参考。**
+
+输出包含三个互相独立的证据层：
+
+| 证据 | 从哪里来 | 可以支持什么结论 |
+| --- | --- | --- |
+| 能力表现 | 本地生成的题目、确定性答案、模型最终 JSON | 这些具体题目的通过率及其相对参考变化 |
+| 请求与路由状态 | HTTP / SSE 状态、Magpie 响应头、路由 trace、usage | 测试是否完整，实际通道是否可比较，是否发生重试或 fallback |
+| 输出指纹 | ModelTrace 数字序列特征与固定参考库 | 当前候选库内更相似的模型标签 |
+
+能力题分数不会与指纹候选权重相加。一次慢响应、一次低分、一个不同的指纹候选，都不足以独立证明“服务商降智”或“后台换模”。
+
+这是小型、定向的可复现检测集，不能覆盖真实软件项目中的需求理解、编辑正确性、工具编排、长期上下文或全部代码能力。
+
+## 2. Magpie 接入方式
+
+插件采用 [Magpie 支持的 OpenCode v1 provider 插件接口](https://usemagpie.ai/docs/zh/plugins)，注册 codex-sentinel provider 及 quick、standard、fingerprint、history 四个虚拟模型。虚拟模型的响应由本地插件生成。
+
+客户端选择诊断模型并发送 sentinel check、sentinel fingerprint、sentinel history 或 sentinel baseline 等完整普通文本指令后，插件解析最后一条用户文本，把明确的操作交给 engine。它没有向 Codex/OpenCode 注册本地斜杠命令；普通文本前缀避免被客户端抢先拦截。/check 等别名保留给直接 HTTP 调用。普通聊天和连接测试只收到帮助说明。能力检测与指纹检测随后通过配置中的 baseUrl 请求 Magpie 的 /v1/responses，由 Magpie 路由到指定的真实 target。
+
+这一设计使用公开插件能力，不替换原工作模型，不对所有工作请求插入中间件，也不依赖一个虚构的原生自定义页面 API。默认没有自动后台监控、定时探针、原任务 fork、任务暂停或模型切换。
+
+### 模块职责
+
+| 文件 | 负责内容 |
+| --- | --- |
+| src/plugin.mjs | Provider 注册、API 登录、完整指令匹配、流式进度、取消传递 |
+| src/config.mjs | 配置验证、公开配置摘要、比较配置键 |
+| src/transport.mjs | Responses 请求、最终回答提取、usage、路由证据与错误分类 |
+| src/suite.mjs | 确定性生成能力题、标准答案、本地判分 |
+| src/assessment.mjs | 完整性汇总、路由可比性、基线与下降规则 |
+| src/fingerprint.mjs | 固定 ModelTrace prompt、严格样本校验、辅助归因报告 |
+| src/storage.mjs | 本地记录、原子写入、基线、同目录运行锁 |
+| src/engine.mjs | 串行执行、进度检查点、汇总与持久化 |
+| src/report.mjs | 中文报告与导出呈现 |
+| bin/sentinel.mjs | 独立 CLI；通过 --config 读取同结构 JSON |
+
+插件从 Magpie 传入的 options 和已登录的网关凭据读取配置。CLI 显式读取 --config，网关凭据只来自 MAGPIE_GATEWAY_KEY。两条入口共享引擎和数据格式，但不隐式读取彼此的设置。
+
+## 3. 请求隔离及实际可观察范围
+
+每题都构建一个新的 Responses 请求，只发送本题内置 prompt，不带原工作聊天、previous_response_id 或此前题目的答案。请求使用 store: false，显式提供空 tools，并请求不使用工具；每题有单独的 Magpie session 标识以查询其路由记录。
+
+“新请求”仅表示没有接入工作会话历史。不能进一步声称它的系统环境与上游参考实验相同。
+
+本次冻结核对的 Magpie 提交为 [4cbde14cea7b41f6acef44cf33021eac9c65abe3](https://github.com/yetone/magpie/commit/4cbde14cea7b41f6acef44cf33021eac9c65abe3)。其中 [internal/provider/codex_request.go](https://github.com/yetone/magpie/blob/4cbde14cea7b41f6acef44cf33021eac9c65abe3/internal/provider/codex_request.go) 对 ChatGPT/Codex 订阅请求存在以下改写：
+
+| 请求字段或行为 | Magpie 的处理 | 对检测的影响 |
+| --- | --- | --- |
+| instructions | 使用 Codex 模型系统指令；客户端自有指令通常移入 developer 输入 | 无工作历史仍可能有较强系统环境影响 |
+| max_output_tokens / max_completion_tokens | 删除 | 输出参数不能充当硬费用上限 |
+| temperature / top_p | 删除 | 不能靠这些参数保证采样条件或固定随机性 |
+| tool_choice | 改为 auto | 插件保留空工具且不执行工具请求，观察到工具事件则单列 |
+| reasoning.effort = ultra | 转为 max | 请求档位与网关记录可能不同，且记录不等于供应商实际推理预算 |
+| store / stream | 强制 false / true | 应正确处理流式结束与中断，不能只判断有无文本 |
+
+这些结论针对冻结版本及相应 Codex 订阅路径；其他 provider、未来版本或用户中间件可能有不同处理。报告保留请求配置与已观察路由，不把它们等同于供应商提供的密码学身份认证。
+
+## 4. 能力题与标准答案
+
+题库版本为 sentinel-v1，分为三个题型：
+
+| family | 题目形式 | 本地验证方式 |
+| --- | --- | --- |
+| candy | 两种形状、三种口味，在最不利取样下保证目标组合的最小配额 | 根据明确库存与最坏情况构造确定性 oracle |
+| js-trace | 短 JavaScript 的数组、引用、循环等执行结果推演 | 本地生成器根据已知模板计算预期答案 |
+| constraint | 五人排序或五个开关的唯一解 | 枚举候选状态，根据约束确认唯一解 |
+
+quick 每种 2 题，共 6 题；standard 每种 6 题，共 18 题。seed、题库版本、family 和题序共同决定题目。相同配置可复现同一批题，模型输出本身仍可能变化。
+
+糖果题只借鉴 [codex-candy-eval](https://github.com/haowang02/codex-candy-eval/tree/29127fa5a12fb7654e865f684dcaf55ade181349) 的测试思路；题面、参数生成与解题校验独立编写，没有复制其源码或题库。归因模块则使用明确带 MIT 许可的 ModelTrace 源码，详见第三方说明。
+
+### 判分边界
+
+模型应返回带 answer 字段的最终 JSON；本地严格检查容器和字段类型，再与预期答案比较。单个完整 json 代码块可被接受，混合正文、错误类型或不完整 JSON 属于格式错误。
+
+本地只读取真正的最终回答通道。Codex 的 commentary、推理摘要或 encrypted reasoning 不作为最终答案判分，也不保存为思考原文。插件不会执行模型生成的代码，不使用另一个模型充当裁判。
+
+| 结果 | 是否进入本轮可判分分母 | 是否阻止整轮能力下降判定 |
+| --- | --- | --- |
+| pass | 是，记为通过 | 否 |
+| wrong_answer | 是，记为不通过 | 否 |
+| invalid_format | 是，记为不通过，并单列格式错误 | 否 |
+| 认证失败、限流、HTTP / 网络错误、超时 | 否 | 是 |
+| 拒答、空输出、工具介入、截断、缺少正常完成事件 | 否 | 是 |
+| 取消、运行中或因整体超时没有完成全部题目 | 否；已完成题可展示 | 是 |
+
+例如 18 题中只有 10 题得到可判分最终输出，报告可以呈现这 10 题的观察通过率，但不会把另外 8 题补为错误，也不会据此给出能力下降结论。
+
+## 5. 路由可比性与基线
+
+请求携带 X-Magpie-Response-Model: vendor，尽量保留返回的供应商模型名。若配置了 account，还携带 Magpie 的账户选择请求头。每题结束读取 X-Magpie-Provider、X-Magpie-Model，并按该题 session 查询 /v1/magpie/route。
+
+路由可比较需要完整、已结束的 trace、唯一成功尝试、头部与 trace 一致，以及整轮网关报告的 provider/model/effort 信息一致。档位缺失时保留未知，不据此声称确认了供应商实际使用的推理预算。缺少证据或发生 fallback 时，只展示本轮得分，不将差异归因于原模型能力变化。账户选择是请求意图，不是插件独立认证的账户身份。
+
+比较配置键包括题库与请求版本、profile、target、baseUrl、请求 effort、seed、账户选择与访问身份摘要，以及影响比较的运行设置。明文访问密钥不会进入公开配置或报告。请求配置相同，还必须检查实际观察路由相同。
+
+### 明确选择参考
+
+基线由用户选择 3–20 个不重复的 run ID 建立。它们必须全部为同题、同配置、同实际路由的完整 standard。运行中、取消、部分完成、quick 与 fingerprint 均不可作为能力基线。
+
+选定后保存整体通过率均值、各题型均值和总通过率范围。后续运行不自动更新参考；避免持续下降的样本悄悄把基线拉低。用户也不应只挑最低的历史结果来建立参考。
+
+## 6. 下降规则与含义
+
+工程阈值固定为：
+
+~~~text
+总下降 = 基线总通过率均值 - 本轮总通过率
+题型下降[f] = 基线题型 f 的通过率均值 - 本轮题型 f 的通过率
+
+下降信号 =
+  总下降 >= 0.20
+  且至少两个题型的下降 >= 0.15
+~~~
+
+第一次达到阈值提示复测。基线建立后，最近连续两轮同配置且实际路由一致的完整标准检测都达到阈值，则升级为连续下降提示。中间出现一轮正常、不可比或未完成记录，不视为连续两轮下降。额外检测由用户主动启动。
+
+这些规则不计算或宣传“降智概率”。小题库的分数具有离散性；每题型只有 6 题，一道题对应约 16.7 个百分点。阈值用于一致地标出值得进一步排查的情况，不能替代独立样本校准，也不能覆盖真实代码任务的全部质量。
+
+该模块不根据指纹、时延或 token 数直接得出下降结论。时延和 usage 是辅助运行记录，网络故障、上游排队与账户限流会与能力错误分开呈现。
+
+## 7. ModelTrace 辅助指纹
+
+固定上游提交为 [d4131b30243dfa05e70180b5eedde742103f1d73](https://github.com/xqy2006/ModelTrace/commit/d4131b30243dfa05e70180b5eedde742103f1d73)。打包原始 JS scorer、完整统一指纹库、严格输出校验器、原始 challenge_suite.py 和 MIT 许可证，并保存原始与本包的来源清单。
+
+三条 prompt 直接取自上游 fingerprint_suite() 的 environment-06，即 clean / English / JSON 参考环境。query-16、query-17、query-18 分别请求 301、319、327 个 1–355 的整数。seed 只决定这三条未修改 prompt 的顺序和本地 ID，不进入模型输入。
+
+严格校验要求单个 JSON 整数数组，允许单个完整代码块包装；不从正文抽数，不拼接数组，不补齐或修改样本。整数必须在 1–355 之间，长度沿用上游规则：至少 max(80, ceil(expectedCount × 0.55))，至多 ceil(expectedCount × 1.25)，回答最多 5000 字符。
+
+通过校验后，使用上游的 75% 数字分布特征与 25% 有序区块特征融合，多个回答分数取均值，再做候选库内的 softmax。库包含 17 个标签、612 份参考回答，构建时间为 2026-09-30。
+
+输出 score 是第一候选的闭集权重，margin 是前两位权重差；它们不等于正确身份概率或降智程度。返回 reported / partial / inconclusive / error 状态，3 份有效样本才是 reported，1–2 份有效样本为 partial。
+
+[上游 provenance](https://github.com/xqy2006/ModelTrace/blob/d4131b30243dfa05e70180b5eedde742103f1d73/codex-plugin/modeltrace-guard/assets/provenance.json)明确标记 sameContextCalibrated 和 multilingualCalibrated 均为 false。本包也标记 magpieTransportCalibrated: false。相同 prompt 文本并未消除 Magpie 的 Codex 系统指令影响；重复样本可能相关，不能将单次错误概率相乘，宣称多次检测后几乎不会误报。
+
+指纹模块没有停用、切换或任务拦截逻辑，也不会认证原工作请求此前的实际模型身份。
+
+## 8. 请求预算、取消和持久化
+
+同一 dataDir 中只允许一个活跃检测，通过带进程信息的本地锁协调插件与 CLI。执行过程串行，插件每轮最多发出 quick 6、standard 18、fingerprint 3 个推理请求；遇到认证错误、限流或取消时提前停止，不增加自动探针。
+
+单题 timeoutMs 与整轮 runTimeoutMs 限制等待与继续发请求的时间。整轮超时标记为 incomplete，CLI 返回 3；用户取消标记为 cancelled，CLI 返回 130。即使最后一题已经取得分数，取消的轮次也不进入能力下降判定。maxResponseBytes 限制本地响应读取规模。由于 Codex 路径可能删除输出 token 参数，且 Magpie 可能内部重试/fallback，这些约束不能保证供应商端最终费用。取消会停止后续请求并尝试中断在途请求，不能承诺供应商立即停止计费。
+
+HTTP 状态与 JSON/SSE 中明确的限流、额度和认证错误使用相同分类。Magpie 在 HTTP 200 keepalive 后返回通用流式错误时，会尝试读取已完成路由中的错误状态。截断和失败响应中已取得的 model、usage 与路由证据仍保留，但不将中途文本当作最终答案。
+
+每题结束写入检查点，记录 running、cancelled、completed 或 incomplete 等整轮执行状态。JSON 使用同目录临时文件、同步与原子替换；部分结果可以排查，但不会成为基线。单份 JSON 的读取和写入都受 32 MiB UTF-8 字节上限约束，超限写入不会覆盖之前的检查点；引擎停止后续请求并明确报告最终保存失败。不可读的历史记录（包括缺失判定字段的记录）保留原文件并单列问题，不影响其他历史的显示。
+
+数据默认保存在 Magpie 配置目录下的 codex-sentinel。原始报告只包含合成测试题、标准答案、最终输出、判分和运行/路由记录；明文密钥和思考原文不持久化。usage 缺失时保持未知，不能把缺失 token 当作没有费用。
+
+## 9. 验证范围
+
+验证围绕确定性 oracle、生成题的可复现性、严格 JSON 判分、Codex 最终通道提取、JSON/SSE 完成状态、mock 网关的路由证据与错误、取消、并发写入、基线可比性和导出。
+
+ModelTrace 的合成数字 fixture 只验证来源完整性、校验器和评分数值稳定性，不用于声称归因准确率。上游交叉验证数据不重新包装成 Magpie 环境中的实测成绩。
+
+当前交付尚未使用用户真实 Magpie 与 Codex 账户做现场端到端验收，也未收集独立验证集标定误报率。后续现场验证应先检查模型列表、一个 quick 与完整 standard 的协议和路由，再建立同配置参考；真实能力变化只能从这些真实运行记录中观察。

@@ -1,0 +1,9 @@
+{
+  "baseUrl": "http://127.0.0.1:3425/v1",
+  "target": "",
+  "effort": "high",
+  "seed": "sentinel-v1-reference",
+  "maxOutputTokens": 8192,
+  "timeoutMs": 120000,
+  "runTimeoutMs": 1800000
+}
