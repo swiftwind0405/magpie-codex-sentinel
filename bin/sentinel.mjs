@@ -5,11 +5,13 @@ import { normalizeOptions } from '../src/config.mjs';
 import { fetchModels } from '../src/transport.mjs';
 import { runEvaluation, runFingerprint, getHistory, getRun, setBaseline, formatReport, formatHistory } from '../src/engine.mjs';
 import { renderHtml } from '../src/report.mjs';
+import { startDashboard, openBrowser } from '../src/web.mjs';
 
-const help = `Codex Sentinel · Magpie 检测插件的命令行入口
+const help = `Codex Sentinel · 本地模型检测台
 
 用法：node bin/sentinel.mjs <命令> [参数]
 
+  ui                             启动本地网页并自动打开浏览器（默认命令）
   models                         查看 Magpie 中真正存在的模型与推理档位
   run --profile quick|standard   运行能力检查（6 / 18 次独立请求）
   fingerprint                    运行 3 次可选 ModelTrace 指纹采样
@@ -19,7 +21,9 @@ const help = `Codex Sentinel · Magpie 检测插件的命令行入口
   export RUN_ID --out FILE        导出报告；--format html|json|md
 
 通用参数：
-  --config FILE                  从 JSON 文件读取插件 options
+  --config FILE                  从 JSON 文件读取检测配置
+  --no-open                      启动网页服务但不自动打开浏览器
+  --port N                       网页端口，默认 47821；0 表示自动分配
   --target PROVIDER/MODEL         目标；必须从 models 列表选择
   --effort high                   请求推理档位；default 表示不显式发送
   --account EMAIL_OR_ID           通过 Magpie 的账户固定请求头指定订阅账户
@@ -34,20 +38,21 @@ const help = `Codex Sentinel · Magpie 检测插件的命令行入口
   --json                         输出 JSON；进度写 stderr
   --force                        export 时允许覆盖已存在的目标文件
 
-认证：插件里用 magpie plugin login codex-sentinel；CLI 读取
-MAGPIE_GATEWAY_KEY，默认本机 token 为 magpie。CLI 不自动读取插件认证文件。
-CLI 与插件共享同一记录目录，但 options 需用 --config 或参数显式传入。
+认证：默认自动连接本机 Magpie，使用默认网关认证。
+自定义密钥通过 MAGPIE_GATEWAY_KEY 环境变量提供，不传给浏览器。
+网页与 CLI 共用检测引擎和记录目录，不需要安装供应商插件。
 
 退出码：0=请求流程完成（不等于已证明健康）；1=配置/存储异常；
 2=达到预设下降阈值；3=检测不完整/有效指纹不足；130=取消。
 `;
 
 function parse(argv) {
-  const result = { command: argv[0] || 'help', positionals: [], flags: {} };
+  const result = { command: argv[0]?.startsWith('--') ? 'ui' : argv[0] || 'ui', positionals: [], flags: {} };
+  if (argv[0] === '-h') { result.command = 'help'; }
   if (result.command === '--help' || result.command === '-h') result.command = 'help';
-  const booleans = new Set(['json', 'allow-remote', 'force', 'help']);
-  const values = new Set(['config', 'target', 'effort', 'account', 'seed', 'base-url', 'directory', 'data-dir', 'timeout-ms', 'run-timeout-ms', 'max-output-tokens', 'max-response-bytes', 'profile', 'out', 'format']);
-  for (let i = 1; i < argv.length; i++) {
+  const booleans = new Set(['json', 'allow-remote', 'force', 'help', 'no-open']);
+  const values = new Set(['config', 'target', 'effort', 'account', 'seed', 'base-url', 'directory', 'data-dir', 'timeout-ms', 'run-timeout-ms', 'max-output-tokens', 'max-response-bytes', 'profile', 'out', 'format', 'port']);
+  for (let i = argv[0]?.startsWith('--') ? 0 : 1; i < argv.length; i++) {
     const item = argv[i];
     if (!item.startsWith('--')) { result.positionals.push(item); continue; }
     const name = item.slice(2);
@@ -62,12 +67,28 @@ function parse(argv) {
 async function main() {
   const args = parse(process.argv.slice(2)); const flags = args.flags;
   if (args.command === 'help' || flags.help) { process.stdout.write(help); return; }
-  if (!['models', 'run', 'fingerprint', 'history', 'show', 'baseline', 'export'].includes(args.command)) throw new Error('未知命令。使用 --help 查看用法。');
+  if (!['ui', 'models', 'run', 'fingerprint', 'history', 'show', 'baseline', 'export'].includes(args.command)) { throw new Error('未知命令。使用 --help 查看用法。'); }
   let options = flags.config ? JSON.parse(await readFile(resolve(flags.config), 'utf8')) : {};
   if (!options || typeof options !== 'object' || Array.isArray(options)) throw new Error('--config 文件必须包含 JSON 对象。');
   options = { ...options };
   const mapping = { target: 'target', effort: 'effort', account: 'account', seed: 'seed', 'base-url': 'baseUrl', 'allow-remote': 'allowRemote', 'data-dir': 'dataDir', 'timeout-ms': 'timeoutMs', 'run-timeout-ms': 'runTimeoutMs', 'max-output-tokens': 'maxOutputTokens', 'max-response-bytes': 'maxResponseBytes' };
   for (const [flag, key] of Object.entries(mapping)) if (flags[flag] !== undefined) options[key] = /^(timeout|run-timeout|max-output|max-response)/.test(flag) ? Number(flags[flag]) : flags[flag];
+  if (args.command === 'ui') {
+    if (args.positionals.length) { throw new Error('ui 不接受额外的位置参数。'); }
+    const dashboard = await startDashboard({ options, directory: flags.directory ? resolve(flags.directory) : undefined, port: flags.port === undefined ? 47821 : Number(flags.port) });
+    process.stdout.write(`Codex Sentinel 已启动：${dashboard.url}\n关闭网页不会中断检测；在此终端按 Ctrl+C 停止服务和当前检测。\n`);
+    const stopped = new Promise((resolveStop) => {
+      const stop = () => { process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); resolveStop(); };
+      process.once('SIGINT', stop);
+      process.once('SIGTERM', stop);
+    });
+    if (!flags['no-open']) {
+      openBrowser(dashboard.url).catch(() => { process.stderr.write(`未能自动打开浏览器，请访问 ${dashboard.url}\n`); });
+    }
+    await stopped;
+    await dashboard.close();
+    return;
+  }
   const controller = new AbortController();
   const cancel = () => controller.abort(new DOMException('User cancelled', 'AbortError'));
   process.once('SIGINT', cancel); process.once('SIGTERM', cancel);

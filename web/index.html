@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Codex Sentinel · 本地检测台</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Codex Sentinel 首页"><span class="mark" aria-hidden="true">S</span><span>CODEX <b>SENTINEL</b></span></a>
+    <div class="connection"><span id="connection-dot" class="dot"></span><span id="connection-label">正在连接 Magpie</span><span class="local-label">本地运行</span></div>
+  </header>
+  <main>
+    <section class="intro">
+      <p class="eyebrow">CODEX ACCOUNTS / 账号能力检查</p>
+      <h1>哪个账号，表现变了。</h1>
+      <p>固定 Codex 账号检测，与该账号自己的历史参考比较。额度不足会单独显示。</p>
+    </section>
+    <div id="notice" class="notice" role="status" hidden></div>
+    <section class="panel account-overview" aria-labelledby="accounts-title">
+      <div class="panel-heading"><div><h2 id="accounts-title">Codex 账号</h2><p>下方能力结论只汇总当前模型、档位和题目种子的检测。</p></div><button id="refresh-accounts" class="text-button" type="button">刷新账号</button></div>
+      <div id="account-cards" class="account-cards"><p>正在读取 Magpie 账号…</p></div>
+    </section>
+    <div class="workspace">
+      <section class="panel setup" aria-labelledby="setup-title">
+        <div class="panel-heading"><h2 id="setup-title">新建检测</h2><span class="section-number">01</span></div>
+        <form id="run-form">
+          <fieldset id="run-fields">
+            <label class="field-label" for="account">检测账号</label>
+            <select id="account" name="account" required><option value="">正在读取账号…</option></select>
+            <p class="hint">严格固定此账号。不可用时停止，不切换到其他账号。</p>
+            <label class="field-label" for="model">检测目标</label>
+            <select id="model" name="model" required><option value="">正在读取模型…</option></select>
+            <div class="field-row"><label class="field-label" for="effort">推理强度</label><button class="text-button" type="button" id="refresh-models">刷新模型</button></div>
+            <select id="effort" name="effort"><option value="high">high</option></select>
+            <span class="field-label type-label">检测类型</span>
+            <label class="profile-option"><input type="radio" name="profile" value="quick" checked><span><strong>快速初筛</strong><small>先确认通道与基本表现</small></span><span class="count">6 题</span></label>
+            <label class="profile-option"><input type="radio" name="profile" value="standard"><span><strong>标准检测</strong><small>完整题集，可建立基线</small></span><span class="count">18 题</span></label>
+            <label class="profile-option"><input type="radio" name="profile" value="fingerprint"><span><strong>行为指纹</strong><small>ModelTrace 辅助候选</small></span><span class="count">3 次</span></label>
+            <details class="advanced"><summary>复现设置</summary><label class="field-label" for="seed">题目种子</label><input id="seed" name="seed" maxlength="200" required value="sentinel-v1-reference"><p>保持相同模型、档位和种子，结果才可比较。</p></details>
+          </fieldset>
+          <button id="start" class="primary" type="submit" disabled>开始快速检测 <span aria-hidden="true">↗</span></button>
+          <button id="cancel" class="secondary cancel" type="button" hidden>停止本轮检测</button>
+          <p id="run-hint" class="hint">仅在点击后发送测试题，使用所选通道的额度。</p>
+        </form>
+        <div class="gateway"><span>已连接的网关</span><code id="gateway-address">127.0.0.1:3425</code><small>使用 Magpie 已有的模型连接，无需再次登录供应商。</small></div>
+      </section>
+      <section class="panel results" aria-labelledby="result-title">
+        <div class="panel-heading"><h2 id="result-title">检测结果</h2><span id="run-state" class="badge">尚未开始</span></div>
+        <div id="empty-result" class="empty-result">
+          <div class="signal" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+          <h3>从一次快速检测开始</h3>
+          <p>组合保证、代码跟踪、约束逻辑。<br>逐题记录最终回答，保留可核查的证据。</p>
+          <div class="empty-notes"><span>固定题集</span><span>本地判分</span><span>历史可追溯</span></div>
+        </div>
+        <div id="progress" hidden>
+          <div class="progress-heading"><strong id="progress-title">正在检测</strong><span id="progress-count">0 / 6</span></div>
+          <progress id="progress-bar" max="6" value="0" aria-label="检测进度"></progress>
+          <p class="hint">刷新或关闭网页后，检测仍会继续。停止服务会取消检测。</p>
+          <ol id="progress-log" class="progress-log" aria-label="逐题进度"></ol>
+        </div>
+        <div id="report" hidden></div>
+      </section>
+    </div>
+    <section class="panel history" aria-labelledby="history-title">
+      <div class="panel-heading"><div><h2 id="history-title">当前账号的检测历史</h2><p>选择至少 3 轮完整、同配置的标准检测，建立该账号自己的参考基线。</p></div><button id="baseline" class="secondary" disabled>设为基线 <span id="selected-count">0</span></button></div>
+      <div class="table-scroll"><table><thead><tr><th scope="col">选择</th><th scope="col">时间</th><th scope="col">模型 / 档位</th><th scope="col">检测</th><th scope="col">结果</th><th scope="col">报告</th></tr></thead><tbody id="history-body"><tr><td colspan="6" class="empty-history">正在读取本地记录…</td></tr></tbody></table></div>
+    </section>
+    <footer><span>Codex Sentinel <span id="version"></span></span><span>分数反映固定题集上的表现，不能证明模型身份或覆盖全部能力。</span></footer>
+  </main>
+</body>
+</html>

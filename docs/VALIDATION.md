@@ -1,43 +1,67 @@
 # 交付验证记录
 
-版本：0.1.0。核对日期：2026-10-09。
+版本：v0.2.0。日期：2026-10-09。以下记录对应本版本的自动化检查与发布前现场验证。
 
-## 已完成
+## 自动化检查
 
-运行环境为 macOS / Node.js 25.8.0 / Bun 1.3.5。执行 `npm test` 和 `bun test`：各 **46 项通过，0 失败、0 跳过**。`npm run check` 通过。
+macOS / Node.js 25.8.0：`npm test` **40 项通过，0 失败、0 跳过**；`npm run check` 通过。`npm pack` 生成的分发包包含 32 个文件，覆盖插件入口、网页、CLI 与 vendor。解压该包后用 Magpie 实际 Bun 宿主加载，确认初始化成功、provider 为空、网页与脚本可读取、退出后端口释放，未发起推理。
 
-| 范围 | 验证内容 |
+| 范围 | 实际验证 |
 | --- | --- |
-| 确定性题库 | 糖果最坏情况 oracle 与独立穷举一致；原始数量所有 201,600 种实际取法；种子重放；JS 跟踪与约束解的独立核验 |
-| 最终答案 | 完整 JSON 和严格类型；拒绝正文出现答案的误命中；Codex commentary 与 final_answer 分离；空最终答案不回退到说明文字 |
-| HTTP / SSE | 真实本地 HTTP 服务；UTF-8 / CRLF 分片；completed 状态校验；截断与缺少终态；工具调用与 reasoning token 缺失；失败和截断响应保留已知 model/usage，部分文本不进入判分 |
-| Magpie 接口形状 | 四个 provider 模型、API 登录 loader、Chat Completions JSON/SSE；安装与普通连接测试不运行探针 |
-| 端到端共享引擎 | 从实际 index.mjs 加载插件并使用普通文本 sentinel check；经本地模拟网关完成 6 题；独立进程 CLI 得到 JSON 结果 |
-| 证据与比较 | 读取完成 trace、排除未完成 route；固定三轮参考；单次与连续下降；模型变化不混比；损坏基线不覆盖原件且本轮结果仍保存 |
-| 错误与取消 | HTTP、JSON、SSE 中的限流/认证错误提前停止；通用 SSE 错误读取已完成 route 的失败状态；最后一题后取消不作下降判定；CLI 整轮超时返回 3，用户取消返回 130；取消基线操作不开始写入；宿主和响应流取消贯通 |
-| 持久化 | 旧锁恢复并发时只有一个所有者；逐题检查点；读写均限制为 32 MiB UTF-8 字节，超限保留原检查点并停止；缺 verdict 的损坏记录不影响历史列表和 CLI JSON 输出；密钥和完整账户邮箱不进入历史 JSON |
-| 指纹 | 完整上游文件 SHA-256；精确参考 prompt；输出合法性；数值稳定；与能力判定分离；请求不额外添加本地 instructions |
-| 导出 | HTML 对题干/最终回答转义；CLI 支持 HTML、JSON、Markdown |
+| 插件 | 加载入口返回空 hooks，不提供 provider/auth/config；不启动推理；两个进程共用端口，原宿主退出后接管，最终退出释放端口 |
+| 网页服务 | 真实 Node HTTP 入口；静态页面、模型和账号读取不发探针；检测、落盘、历史、HTML/JSON/MD 导出 |
+| 账号选择 | 无账号、未知账号、已删除账号、非 codex/ 目标被拒绝；检测头固定选定账号；包含中文团队后缀的名字按 UTF-8 字节传输 |
+| 网关版本 | 低于已核对版本的网关不能启动账号检测，不让被忽略的请求头变成错误归属 |
+| 账号隔离 | 不同账号使用不同比较配置，历史按账号过滤；混合账号不能建立基线；报告不持久化完整账号名称 |
+| 本地请求限制 | 其他 Origin、伪造 Host、缺少修改请求头被拒绝；任意源码路径不可读取 |
+| 状态与取消 | 刷新读取同一任务，重复启动返回 409，错误任务 ID 不取消当前任务；取消后落盘、释放锁，可再运行 |
+| 基线 | HTTP 选择三轮完整 standard 后产生可读取参考文件，源报告不变；quick、取消、部分完成和不一致路由被拒绝 |
+| CLI | 默认网页入口、--no-open、--port 0；SIGINT 取消在途任务并保存；检测/导出及退出状态 |
+| 题库与评分 | 独立穷举 oracle、种子重放、跟踪与约束答案核验、严格 JSON 类型、最终回答通道 |
+| 协议与存储 | JSON/SSE 终态、失败用量保留、限流/认证、超时、目录锁、32 MiB 读写、损坏文件隔离 |
+| 指纹 | 上游文件 SHA-256、原始参考 prompt、输出校验、闭集评分稳定性、与能力判断分离 |
 
-这些 HTTP 响应由本机 fixture 生成。合成 fixture 的正确率仅用于验证程序，**不是对任何真实模型的检测成绩**。
+HTTP fixture 控制外部网关，验证本插件行为，不代表真实模型成绩。Host 检查使用 Node 原生 HTTP 客户端；fetch 会规范化 Host。
 
-## 源码兼容性核对
+## Magpie 真实宿主与桌面端
+
+环境：Magpie 桌面 **0.1.1132**，其自带 Bun **1.4.2**，Microsoft Edge，网关 `http://127.0.0.1:3425/v1`。
+
+- 用已安装 Magpie 的实际 `host-c2755a32f702.js` 加载插件：初始化成功，provider 列表为空；网页读到 3 个真实 Codex 账号，没有发送探针。关闭宿主 stdin 后网页端口释放。
+- 用 `magpie plugin add` 安装本地源码后，Edge 自动打开 `http://127.0.0.1:47821`。页面显示 3 个 Codex 账号和 3 个 Codex 模型，无供应商或网关密钥登录步骤。
+- 本地插件 `off` 后网页不可连接；`on` 后恢复。`/v1/models` 不包含 Sentinel 虚拟模型。旧 v0.1.0 provider 插件保持停用，未删除其登录记录。
+- 网页启动标准检测时，账号、模型和档位被锁定，逐题进度显示选中的账号。服务返回的完整结果与落盘 JSON 一致。
+
+## 固定账号的真实检测
+
+本次没有替用户选择“健康基线”。账号名在本机网页中完整显示，此文档只记录掩码和报告 ID。
+
+| 账号 | 目标 / 档位 | 结果 | Run ID |
+| --- | --- | --- | --- |
+| Le***@outlook.com · ProLite | codex/gpt-6-astra / high | standard，18/18 通过，三个题型各 6/6；无基线 | 20261009T095104152Z-189cad60 |
+| sw***@outlook.com · Plus | codex/gpt-6-astra / high | quick 首个请求 HTTP 429 后停止，0 道可评分 | 20261009T095620528Z-0d82b007 |
+| sw***@live.cn · Team | codex/gpt-6-astra / high | quick 首个请求 HTTP 429 后停止，0 道可评分 | 20261009T095622579Z-da5cf965 |
+
+标准检测逐题耗时合计 **134.552 秒**，input 78,917、output 1,896、reasoning 1,652、cached input 72,192。18 题均有完整一致的 `codex/gpt-6-astra / high` 路由证据，上游自报 `gpt-6-astra`；无缺失 trace、fallback 或头部冲突。
+
+另外用每题的唯一 session 对照本机 Magpie `usage.jsonl`，匹配到 **18 条记录，providerAccount 全部等于所选 ProLite 账号，均为 HTTP 200**。这是实际网关账号归属证据，不只是验证发出了一个请求头。报告自身依赖 Magpie 的固定账号契约，不读取供应商令牌、也不能独立认证供应商内部身份。
+
+两个额度不足账号均提前停止并记录为 `incomplete / rate_limited`，没有补用其他账号的答案，也没有当作能力错误。Team 账号的名字包含非 ASCII 团队分隔符，真实宿主请求也得到了对应的限流结果。
+
+所有报告保留在本机 Magpie 配置目录下 `codex-sentinel/runs`，未提交到仓库。先前未固定账号的 quick 记录 `20261009T084918438Z-d18ca65d` 保留，但不归属到任何账号卡片。
+
+## 核对的源码契约
 
 | 项目 | 固定提交 |
 | --- | --- |
-| Magpie 请求改写 | 4cbde14cea7b41f6acef44cf33021eac9c65abe3 |
-| Magpie Bun 宿主与路由契约 | 62b1c995ffaebb223ad040b4c54ebabab0078c7a |
+| Magpie 插件加载、账号 pinTo、路由 trace | 62b1c995ffaebb223ad040b4c54ebabab0078c7a |
+| Magpie Codex 请求改写 | 4cbde14cea7b41f6acef44cf33021eac9c65abe3 |
 | codex-candy-eval（仅参考思路） | 29127fa5a12fb7654e865f684dcaf55ade181349 |
 | ModelTrace（MIT 原件） | d4131b30243dfa05e70180b5eedde742103f1d73 |
 
-已核对 Magpie 的 provider hook、插件选项、账户固定请求头、响应模型头、session route 类型与 Codex 请求改写代码。主分支在本次工作期间有新提交，上表记录实际核对的冻结版本。
+## 尚未验证或不能据此推出
 
-使用第二个 Magpie 提交的原始 `internal/plugin/host.js` 在 Bun 中启动宿主，通过其 stdin/stdout RPC 加载本目录插件，验证初始化、四个模型注册、普通消息返回帮助且不发探针、`sentinel check` 返回流式结果及本地网关 HTTP 429 后只发一个探针。该验证使用临时目录与测试凭据，没有运行完整 Go 网关。
-
-## 尚未现场验证
-
-当前环境没有 Magpie 可执行程序，没有接入用户的 Codex 通道。已验证上述固定版本的 Bun 宿主，但没有执行完整 Magpie 网关到真实供应商的端到端推理，也没有测试其他 Magpie 版本、供应商的最终 token 上限执行情况或独立误报率。
-
-本机首次安装后按 README 执行：列模型、配置真实 target、登录、运行 quick；确认路由 trace 完整后再进行 standard 和基线建立。`magpie provider test codex-sentinel` 只验证入口能返回帮助，不会代替正式检测。
-
-上线后的结论范围仍是固定小题集在指定路由上的表现。报告中的网关 model、档位、自报 model 与 ModelTrace 候选，都不能独立证明供应商的实际模型权重或内部推理预算。
+- 真实账号的三轮基线与后续下降比较、ModelTrace 指纹仍只有 fixture 验证；本次标准成绩不能证明相对过去没有下降。
+- Windows/Linux 的浏览器自动打开，其他 Magpie 版本与网关定制中间件的兼容性。
+- 宿主强制退出时在途题的完整保存、供应商立即停止推理与计费；只保证已经落盘的检查点保留。
+- 独立误报率、指纹归因准确率、模型内部身份或真实任务的全部能力。

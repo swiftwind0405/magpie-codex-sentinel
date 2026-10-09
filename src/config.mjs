@@ -2,9 +2,10 @@ import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.0';
 export const REQUEST_VERSION = 'responses-isolated-v1';
 export const hash = (value) => createHash('sha256').update(String(value)).digest('hex');
+export const accountId = (baseUrl, account) => account ? hash(`${baseUrl}\ncodex\n${account.toLowerCase()}`).slice(0, 16) : null;
 
 export function defaultDirectory() {
   return join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'magpie');
@@ -30,7 +31,7 @@ export function normalizeOptions(options = {}, { directory, apiKey, requireTarge
   base.pathname = base.pathname.replace(/\/+$/, '') || '/v1';
   if (!base.pathname.endsWith('/v1')) throw new Error('baseUrl 应以 /v1 结尾，例如 http://127.0.0.1:3425/v1。');
   const target = typeof options.target === 'string' ? options.target.trim() : '';
-  if (requireTarget && !target) throw new Error('请先在插件 options 中设置 target，格式为 Magpie 模型列表中的 provider/model。');
+  if (requireTarget && !target) { throw new Error('请选择检测目标，或设置 target 为 Magpie 模型列表中的 provider/model。'); }
   if (target && (!/^[^\s/]+\/[^\s]+$/.test(target) || /[\u0000-\u001f]/.test(target))) throw new Error('target 必须是完整的 provider/model，不能只写模型名。');
   if (/^codex-sentinel(?:-plugin)?\//.test(target)) throw new Error('检测目标不能是检测插件自己。请选择真正的 Codex 通道。');
   const effort = options.effort ?? 'high';
@@ -64,6 +65,7 @@ export function publicConfig(config) {
     seed: config.seed, maxOutputTokens: config.maxOutputTokens,
     timeoutMs: config.timeoutMs, runTimeoutMs: config.runTimeoutMs,
     accountPinned: Boolean(config.account), accountHint,
+    accountId: accountId(config.baseUrl, config.account),
     // Never serialize an auth key or the unmasked account name.
     accessIdentity: hash(`${config.baseUrl}\n${config.apiKey}\n${config.account}`),
     requestVersion: REQUEST_VERSION, concurrency: 1,

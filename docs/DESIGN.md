@@ -2,7 +2,7 @@
 
 ## 1. 要检测的对象
 
-本插件观察的是：**某条 Magpie 路由在固定设置与固定题目上的当前表现，是否持续低于用户选定的历史参考。**
+Sentinel 观察的是：**Codex provider 下的某个账号，在固定模型、档位和题目上的当前表现，是否持续低于该账号自己的历史参考。** 网页必须选择账号；CLI 的未固定账号记录只代表整条路由，不进入账号概览。
 
 输出包含三个互相独立的证据层：
 
@@ -18,17 +18,25 @@
 
 ## 2. Magpie 接入方式
 
-插件采用 [Magpie 支持的 OpenCode v1 provider 插件接口](https://usemagpie.ai/docs/zh/plugins)，注册 codex-sentinel provider 及 quick、standard、fingerprint、history 四个虚拟模型。虚拟模型的响应由本地插件生成。
+0.2.0 保留 Magpie 插件入口。Magpie 的 Bun 宿主加载 index.mjs → src/plugin.mjs，插件启动仅监听 127.0.0.1 的 HTTP 服务，并通过操作系统打开默认浏览器；返回空 hooks，不注册 auth、provider 或 config。无需修改 Magpie。CLI 可以独立启动同一网页服务。
 
-客户端选择诊断模型并发送 sentinel check、sentinel fingerprint、sentinel history 或 sentinel baseline 等完整普通文本指令后，插件解析最后一条用户文本，把明确的操作交给 engine。它没有向 Codex/OpenCode 注册本地斜杠命令；普通文本前缀避免被客户端抢先拦截。/check 等别名保留给直接 HTTP 调用。普通聊天和连接测试只收到帮助说明。能力检测与指纹检测随后通过配置中的 baseUrl 请求 Magpie 的 /v1/responses，由 Magpie 路由到指定的真实 target。
+账号由 /v1/magpie/quotas 的 Codex 记录提供；模型来自 /v1/models 的 codex/ 子集。网页每轮必须提交一个当前账号标识，服务端重新校验账号仍存在，再使用其完整名字固定请求。版本检查拒绝低于已验证契约版本 0.1.1132 或无法识别的网关。额度与能力结论分列；仅凭额度不足不会生成能力下降标签。
 
-这一设计使用公开插件能力，不替换原工作模型，不对所有工作请求插入中间件，也不依赖一个虚构的原生自定义页面 API。默认没有自动后台监控、定时探针、原任务 fork、任务暂停或模型切换。
+本地服务拥有当前检测任务、取消信号和结果；浏览器定期读取任务状态。关闭或刷新网页不取消、不重建任务。当前服务只接受一轮活跃检测，跨进程仍由 storage 的目录锁约束。网页取消和 CLI 正常关闭会保存取消状态。Magpie 停用、更新插件或退出时会结束宿主，HTTP socket 随进程关闭；硬退出只能保留已落盘检查点，不承诺在途题的最终保存。重启后从历史读取部分记录，它们不能作为基线。
+
+Magpie CLI 与桌面可能各启动宿主。插件仅复用同版本、同数据目录和网关的插件网页服务；其他占用报错。未取得监听权的宿主每两秒尝试接管，原宿主退出后恢复服务；自动打开浏览器以本地时间戳抑制 30 秒内的重复弹窗。没有脱离 Magpie 生命周期的后台子进程。
+
+网关认证由进程使用 MAGPIE_GATEWAY_KEY 或默认本机值，不传给浏览器。HTTP 服务校验 Host、Origin 和修改请求的自定义头，不开放 CORS，不向局域网监听。静态文件采用固定白名单，模型内容按文本转义展示。页面只在用户点击开始时发探针；默认没有后台监控、定时探针或模型切换。
+
+v0.1.0 的 provider 包装已被替换，回看旧实现可使用该 tag。引擎、数据格式、CLI 检测命令和默认记录路径保留；pluginVersion 字段沿用历史 schema 命名，值为当前 Sentinel 版本。
 
 ### 模块职责
 
 | 文件 | 负责内容 |
 | --- | --- |
-| src/plugin.mjs | Provider 注册、API 登录、完整指令匹配、流式进度、取消传递 |
+| index.mjs / src/plugin.mjs | Magpie 插件入口、宿主内网页启动、端口接管、自动打开 |
+| src/web.mjs | 本地 HTTP、任务状态、模型列表、历史/基线/导出入口、浏览器启动 |
+| web/ | 账号概览、账号/模型选择、逐题进度、报告、该账号的历史与基线 |
 | src/config.mjs | 配置验证、公开配置摘要、比较配置键 |
 | src/transport.mjs | Responses 请求、最终回答提取、usage、路由证据与错误分类 |
 | src/suite.mjs | 确定性生成能力题、标准答案、本地判分 |
@@ -37,9 +45,9 @@
 | src/storage.mjs | 本地记录、原子写入、基线、同目录运行锁 |
 | src/engine.mjs | 串行执行、进度检查点、汇总与持久化 |
 | src/report.mjs | 中文报告与导出呈现 |
-| bin/sentinel.mjs | 独立 CLI；通过 --config 读取同结构 JSON |
+| bin/sentinel.mjs | 默认启动网页；保留 CLI 检测与导出，--config 读取配置 |
 
-插件从 Magpie 传入的 options 和已登录的网关凭据读取配置。CLI 显式读取 --config，网关凭据只来自 MAGPIE_GATEWAY_KEY。两条入口共享引擎和数据格式，但不隐式读取彼此的设置。
+插件使用 Magpie 传入的 options；CLI 使用 --config 和命令行参数。网页只允许选择账号并覆盖本轮 target、effort 和 seed；网关、凭据、路径与运行上限由服务启动配置决定。完整账号名只来自 Magpie 的公开账号接口，不读取订阅登录令牌。浏览器仅缓存选择，报告通过稳定账号摘要映射回名称。
 
 ## 3. 请求隔离及实际可观察范围
 
@@ -54,7 +62,7 @@
 | instructions | 使用 Codex 模型系统指令；客户端自有指令通常移入 developer 输入 | 无工作历史仍可能有较强系统环境影响 |
 | max_output_tokens / max_completion_tokens | 删除 | 输出参数不能充当硬费用上限 |
 | temperature / top_p | 删除 | 不能靠这些参数保证采样条件或固定随机性 |
-| tool_choice | 改为 auto | 插件保留空工具且不执行工具请求，观察到工具事件则单列 |
+| tool_choice | 改为 auto | 检测引擎保留空工具且不执行工具请求，观察到工具事件则单列 |
 | reasoning.effort = ultra | 转为 max | 请求档位与网关记录可能不同，且记录不等于供应商实际推理预算 |
 | store / stream | 强制 false / true | 应正确处理流式结束与中断，不能只判断有无文本 |
 
@@ -78,7 +86,7 @@ quick 每种 2 题，共 6 题；standard 每种 6 题，共 18 题。seed、题
 
 模型应返回带 answer 字段的最终 JSON；本地严格检查容器和字段类型，再与预期答案比较。单个完整 json 代码块可被接受，混合正文、错误类型或不完整 JSON 属于格式错误。
 
-本地只读取真正的最终回答通道。Codex 的 commentary、推理摘要或 encrypted reasoning 不作为最终答案判分，也不保存为思考原文。插件不会执行模型生成的代码，不使用另一个模型充当裁判。
+本地只读取真正的最终回答通道。Codex 的 commentary、推理摘要或 encrypted reasoning 不作为最终答案判分，也不保存为思考原文。检测引擎不会执行模型生成的代码，不使用另一个模型充当裁判。
 
 | 结果 | 是否进入本轮可判分分母 | 是否阻止整轮能力下降判定 |
 | --- | --- | --- |
@@ -93,9 +101,9 @@ quick 每种 2 题，共 6 题；standard 每种 6 题，共 18 题。seed、题
 
 ## 5. 路由可比性与基线
 
-请求携带 X-Magpie-Response-Model: vendor，尽量保留返回的供应商模型名。若配置了 account，还携带 Magpie 的账户选择请求头。每题结束读取 X-Magpie-Provider、X-Magpie-Model，并按该题 session 查询 /v1/magpie/route。
+请求携带 X-Magpie-Response-Model: vendor，尽量保留返回的供应商模型名。网页每题携带 X-Magpie-Account；非 ASCII 账号名按 UTF-8 字节写入头，保留团队后缀。已核对 Magpie 的 pinTo 契约：只保留选中账号，不存在或不可用时直接报错，不回退到其他账号。每题结束读取 X-Magpie-Provider、X-Magpie-Model，并按该题 session 查询 /v1/magpie/route。
 
-路由可比较需要完整、已结束的 trace、唯一成功尝试、头部与 trace 一致，以及整轮网关报告的 provider/model/effort 信息一致。档位缺失时保留未知，不据此声称确认了供应商实际使用的推理预算。缺少证据或发生 fallback 时，只展示本轮得分，不将差异归因于原模型能力变化。账户选择是请求意图，不是插件独立认证的账户身份。
+路由可比较需要完整、已结束的 trace、唯一成功尝试、头部与 trace 一致，以及整轮网关报告的 provider/model/effort 信息一致。档位缺失时保留未知，不据此声称确认了供应商实际使用的推理预算。缺少证据或发生 fallback 时，只展示本轮得分，不将差异归因于原模型能力变化。账户选择是请求意图，不是 Sentinel 独立认证的账户身份。
 
 比较配置键包括题库与请求版本、profile、target、baseUrl、请求 effort、seed、账户选择与访问身份摘要，以及影响比较的运行设置。明文访问密钥不会进入公开配置或报告。请求配置相同，还必须检查实际观察路由相同。
 
@@ -142,7 +150,7 @@ quick 每种 2 题，共 6 题；standard 每种 6 题，共 18 题。seed、题
 
 ## 8. 请求预算、取消和持久化
 
-同一 dataDir 中只允许一个活跃检测，通过带进程信息的本地锁协调插件与 CLI。执行过程串行，插件每轮最多发出 quick 6、standard 18、fingerprint 3 个推理请求；遇到认证错误、限流或取消时提前停止，不增加自动探针。
+同一 dataDir 中只允许一个活跃检测，通过带进程信息的本地锁协调网页服务与 CLI。执行过程串行，每轮最多发出 quick 6、standard 18、fingerprint 3 个推理请求；遇到认证错误、限流或取消时提前停止，不增加自动探针。
 
 单题 timeoutMs 与整轮 runTimeoutMs 限制等待与继续发请求的时间。整轮超时标记为 incomplete，CLI 返回 3；用户取消标记为 cancelled，CLI 返回 130。即使最后一题已经取得分数，取消的轮次也不进入能力下降判定。maxResponseBytes 限制本地响应读取规模。由于 Codex 路径可能删除输出 token 参数，且 Magpie 可能内部重试/fallback，这些约束不能保证供应商端最终费用。取消会停止后续请求并尝试中断在途请求，不能承诺供应商立即停止计费。
 
@@ -158,4 +166,4 @@ HTTP 状态与 JSON/SSE 中明确的限流、额度和认证错误使用相同�
 
 ModelTrace 的合成数字 fixture 只验证来源完整性、校验器和评分数值稳定性，不用于声称归因准确率。上游交叉验证数据不重新包装成 Magpie 环境中的实测成绩。
 
-当前交付尚未使用用户真实 Magpie 与 Codex 账户做现场端到端验收，也未收集独立验证集标定误报率。后续现场验证应先检查模型列表、一个 quick 与完整 standard 的协议和路由，再建立同配置参考；真实能力变化只能从这些真实运行记录中观察。
+0.2.0 的 Magpie 插件加载、网页入口、具体账号请求与现场检测证据见 [VALIDATION.md](VALIDATION.md)。多轮真实基线、指纹和独立误报率校准的状态以该记录为准。

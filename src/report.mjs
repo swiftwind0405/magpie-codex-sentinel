@@ -8,10 +8,10 @@ const brief = (value, length = 160) => { const s = typeof value === 'string' ? v
 const token = (value, reported, total) => value === null || value === undefined ? '未返回' : `${value.toLocaleString('en-US')}${reported < total ? `（${reported}/${total} 个请求有数据）` : ''}`;
 
 export function formatHistory(rows = []) {
-  if (!rows.length) return '暂无检测历史。选择 quick 或 standard 模型并发送 `sentinel check`，或用 CLI 运行检测。';
+  if (!rows.length) { return '暂无检测历史。在本地网页选择模型并开始检测，或用 CLI 运行检测。'; }
   const lines = ['## 检测历史', '', '| Run ID | 时间（UTC） | 检测 | 目标 | 结果 |', '|---|---|---|---|---|'];
   for (const r of rows) lines.push(`| ${md(r.id)} | ${md(r.startedAt || '—')} | ${md(r.profile || r.kind)} | ${md(r.config?.target || '—')} | ${md(r.kind === 'evaluation' ? `${r.summary.passed}/${r.summary.usable} · ${r.verdict.label}` : r.kind === 'fingerprint' ? `${r.fingerprint?.status} · ${r.fingerprint?.prediction || '未得出候选'}` : r.error)} |`);
-  lines.push('', '建立能力参考：在 history 模型发送 `sentinel baseline ID1 ID2 ID3`。只接受至少三轮同配置、同实际通道且完整完成的 standard 检测。历史结果不会因新基线重新改写。');
+  lines.push('', '建立能力参考：在网页历史列表勾选至少三轮 standard，点击“设为基线”，或使用 CLI baseline 命令。只接受同配置、同实际通道且完整完成的标准检测。历史结果不会因新基线重新改写。');
   return lines.join('\n');
 }
 

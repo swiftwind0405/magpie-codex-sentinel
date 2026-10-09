@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { mkdtemp, rm, readFile, writeFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import plugin from '../index.mjs';
+import { startDashboard } from '../src/web.mjs';
 import { buildSuite } from '../src/suite.mjs';
 import { normalizeOptions } from '../src/config.mjs';
 import { parseResponse, normalizeUsage } from '../src/transport.mjs';
@@ -16,7 +16,7 @@ import { acquireRun, ensureStore, readBaseline, atomicJSON } from '../src/storag
 import { renderHtml, formatHistory } from '../src/report.mjs';
 
 const seed = 'integration-fixture-only';
-const model = 'fixture/codex-test';
+const model = 'codex/fixture-test';
 const message = (text, phase = 'final_answer') => ({ type: 'message', role: 'assistant', phase, content: [{ type: 'output_text', text }] });
 const complete = (text, output) => ({ type: 'response.completed', response: { status: 'completed', model: 'fixture-version', output: output || [message(text)], usage: { input_tokens: 50, output_tokens: 10, output_tokens_details: { reasoning_tokens: 0 } } } });
 
@@ -29,10 +29,19 @@ async function fixture(t) {
   const directory = await mkdtemp(join(tmpdir(), 'sentinel-e2e-'));
   const answers = new Map(buildSuite({ profile: 'standard', seed }).map((c) => [c.prompt, c.expected]));
   const state = { calls: [], sessions: new Map(), wrong: false, errorStatus: null, member: model, routePending: false, routeReads: 0, tools: false,
-    events: null, json: null, text: null, hang: false, routeStatus: 200 };
+    events: null, json: null, text: null, hang: false, routeStatus: 200, gatewayVersion: '0.1.1132',
+    accounts: [{ provider: 'codex', user: 'private@example.test', plan: 'test', windows: [] }, { provider: 'codex', user: 'second@example.test', plan: 'test', windows: [] }] };
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url, 'http://127.0.0.1');
+      if (url.pathname === '/v1') {
+        response.setHeader('content-type', 'application/json');
+        response.end(JSON.stringify({ name: 'magpie', version: state.gatewayVersion })); return;
+      }
+      if (url.pathname === '/v1/magpie/quotas') {
+        response.setHeader('content-type', 'application/json');
+        response.end(JSON.stringify({ data: state.accounts })); return;
+      }
       if (url.pathname === '/v1/models') { response.setHeader('content-type', 'application/json'); response.end(JSON.stringify({ data: [{ id: model, supported_reasoning_levels: [{ effort: 'high' }] }] })); return; }
       if (url.pathname === '/v1/magpie/route') {
         state.routeReads++; const session = url.searchParams.get('session'); const seen = state.sessions.get(session);
@@ -297,13 +306,173 @@ test('fingerprint requests use exact upstream prompts without added local instru
   for (const call of f.state.calls) assert.equal(Object.hasOwn(call.body, 'instructions'), false);
 });
 
-test('real plugin entry runs the shared engine via a plain command, while native connection tests stay free', async (t) => {
-  const f = await fixture(t); const hooks = await plugin({ directory: f.directory }, f.options);
-  const loader = await hooks.auth.loader(async () => ({ type: 'api', key: f.args.apiKey }));
-  const send = (content) => loader.fetch('http://127.0.0.1:1/virtual', { method: 'POST', body: JSON.stringify({ model: 'quick', stream: true, messages: [{ role: 'user', content }] }) });
-  assert.match(await (await send('Hi')).text(), /sentinel check/); assert.equal(f.state.calls.length, 0);
-  const text = await (await send('sentinel check')).text();
-  assert.match(text, /6\/6/); assert.match(text, /快速初筛/); assert.equal(f.state.calls.length, 6);
+async function dashboard(t, f) {
+  const app = await startDashboard({ ...f.args, port: 0 });
+  t.after(() => app.close());
+  const request = (path, body, headers = {}) => fetch(app.url + path, body === undefined ? { headers } : {
+    method: 'POST', headers: { origin: app.url, 'content-type': 'application/json', 'x-sentinel-request': '1', ...headers }, body: JSON.stringify(body),
+  });
+  const { accounts } = await (await request('/api/accounts')).json();
+  const finished = async () => {
+    for (let i = 0; i < 500; i++) {
+      const { job } = await (await request('/api/state')).json();
+      if (job && ['done', 'failed'].includes(job.status)) { return job; }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.fail('Dashboard run did not finish within 5 seconds');
+  };
+  return { app, request, finished, accounts };
+}
+
+test('dashboard uses the real HTTP engine, exposes saved reports and blocks cross-origin probe requests', async (t) => {
+  const f = await fixture(t);
+  const d = await dashboard(t, f);
+  assert.match(await (await d.request('/')).text(), /本地检测台/);
+  assert.equal((await d.request('/src/web.mjs')).status, 404);
+  // fetch normalizes Host to the URL; use HTTP directly to exercise rebinding.
+  const badHostStatus = await new Promise((resolve, reject) => {
+    const request = httpRequest(`${d.app.url}/api/state`, { headers: { host: 'evil.example' } }, (response) => { response.resume(); resolve(response.statusCode); });
+    request.on('error', reject); request.end();
+  });
+  assert.equal(badHostStatus, 403);
+  const data = await (await d.request('/api/models')).json();
+  assert.equal(data.models[0].id, model);
+  assert.equal(f.state.calls.length, 0);
+  const body = { target: model, profile: 'quick', effort: 'high', accountId: d.accounts[0].id };
+  assert.equal((await d.request('/api/runs', { ...body, accountId: undefined })).status, 400);
+  assert.equal((await d.request('/api/runs', { ...body, accountId: 'unknown-account' })).status, 400);
+  assert.equal((await d.request('/api/runs', { ...body, target: 'group/auto' })).status, 400);
+  assert.equal((await d.request('/api/runs', body, { origin: 'https://evil.example' })).status, 403);
+  assert.equal((await d.request('/api/runs', body, { 'x-sentinel-request': '' })).status, 403);
+  assert.equal((await d.request('/api/runs', { ...body, profile: 'unknown' })).status, 400);
+  assert.equal(f.state.calls.length, 0);
+  assert.equal((await d.request('/api/runs', body)).status, 202);
+  const job = await d.finished();
+  assert.equal(job.status, 'done');
+  const report = await (await d.request(`/api/runs/${job.reportId}`)).json();
+  assert.equal(report.summary.passed, 6);
+  assert.equal(report.runStatus, 'completed');
+  assert.equal((await getRun({ ...f.args, id: report.id })).id, report.id);
+  const history = await (await d.request('/api/history')).json();
+  assert.equal(history.runs[0].id, report.id);
+  assert.equal('cases' in history.runs[0], false);
+  for (const format of ['html', 'md', 'json']) {
+    const response = await d.request(`/api/runs/${report.id}/export?format=${format}`);
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get('content-disposition'), /attachment/);
+    const text = await response.text();
+    assert.ok(text.includes(report.id));
+    assert.equal(text.includes(f.args.apiKey), false);
+  }
+  assert.equal((await d.request('/api/baseline', { runIds: [report.id] })).status, 400);
+  assert.equal(f.state.calls.length, 6);
+  assert.equal(JSON.stringify({ job, history, report }).includes(f.args.apiKey), false);
+});
+
+test('dashboard refresh cannot duplicate jobs; stopping a job persists cancellation and releases the run lock', async (t) => {
+  const f = await fixture(t);
+  f.state.hang = true;
+  const d = await dashboard(t, f);
+  const body = { target: model, profile: 'quick', accountId: d.accounts[0].id };
+  const started = await (await d.request('/api/runs', body)).json();
+  assert.equal((await d.request('/api/runs', body)).status, 409);
+  for (let i = 0; i < 100 && !f.state.calls.length; i++) { await new Promise((resolve) => setTimeout(resolve, 10)); }
+  assert.equal(f.state.calls.length, 1);
+  const refreshed = await (await d.request('/api/state')).json();
+  assert.equal(refreshed.job.id, started.job.id);
+  assert.equal(refreshed.job.status, 'running');
+  assert.equal((await d.request('/api/cancel', { id: 'a-different-job' })).status, 409);
+  assert.equal((await d.request('/api/cancel', { id: started.job.id })).status, 202);
+  const job = await d.finished();
+  const report = await getRun({ ...f.args, id: job.reportId });
+  assert.equal(report.runStatus, 'cancelled');
+  assert.equal(report.verdict.code, 'incomplete');
+  assert.equal(report.cases.length, 1);
+  assert.equal(f.state.calls.length, 1);
+  f.state.hang = false;
+  assert.equal((await d.request('/api/runs', body)).status, 202);
+  const next = await d.finished();
+  assert.notEqual(next.reportId, job.reportId);
+  assert.equal((await getRun({ ...f.args, id: next.reportId })).runStatus, 'completed');
+});
+
+test('dashboard baseline selection writes a reusable reference and preserves all source runs', async (t) => {
+  const f = await fixture(t);
+  const d = await dashboard(t, f);
+  const runs = [];
+  for (let i = 0; i < 3; i++) {
+    assert.equal((await d.request('/api/runs', { target: model, profile: 'standard', accountId: d.accounts[0].id })).status, 202);
+    const job = await d.finished();
+    runs.push(await getRun({ ...f.args, id: job.reportId }));
+  }
+  const ids = runs.map((run) => run.id);
+  const response = await d.request('/api/baseline', { runIds: ids });
+  assert.equal(response.status, 200);
+  assert.deepEqual((await readBaseline(join(f.directory, 'codex-sentinel'), runs[0].comparisonKey)).runIds, ids);
+  for (const run of runs) { assert.deepEqual(await getRun({ ...f.args, id: run.id }), run); }
+});
+
+test('account selection pins the named account, separates history and rejects mixed-account baselines', async (t) => {
+  const f = await fixture(t);
+  f.state.accounts[1].user = 'second@example.test · 团队';
+  const d = await dashboard(t, f);
+  const runs = [];
+  for (const account of [d.accounts[0], d.accounts[0], d.accounts[1]]) {
+    assert.equal((await d.request('/api/runs', { target: model, profile: 'standard', accountId: account.id })).status, 202);
+    const job = await d.finished();
+    assert.equal(job.accountName, account.name);
+    const report = await getRun({ ...f.args, id: job.reportId });
+    assert.equal(report.config.accountId, account.id);
+    assert.equal(report.config.accountPinned, true);
+    assert.equal(Buffer.from(f.state.calls.at(-1).headers['x-magpie-account'], 'latin1').toString('utf8'), account.name);
+    runs.push(report);
+  }
+  assert.equal(runs[0].comparisonKey, runs[1].comparisonKey);
+  assert.notEqual(runs[1].comparisonKey, runs[2].comparisonKey);
+  const mixed = await d.request('/api/baseline', { runIds: runs.map((run) => run.id) });
+  assert.equal(mixed.status, 400);
+  assert.match((await mixed.json()).error, /账户/);
+  const history = await getHistory(f.args);
+  assert.deepEqual(new Set(history.map((run) => run.id)), new Set(runs.slice(0, 2).map((run) => run.id)));
+  const { runs: all } = await (await d.request('/api/history')).json();
+  assert.equal(all.length, 3);
+  assert.equal(JSON.stringify(all).includes(f.state.accounts[1].user), false, 'Persisted reports mask names; the local account list maps their stable IDs');
+  f.state.accounts.pop();
+  assert.equal((await d.request('/api/runs', { target: model, profile: 'quick', accountId: d.accounts[1].id })).status, 400);
+  assert.equal(f.state.calls.length, 54, 'A removed account must never fall back to an existing account');
+  f.state.gatewayVersion = '0.1.1000';
+  assert.equal((await d.request('/api/runs', { target: model, profile: 'quick', accountId: d.accounts[0].id })).status, 502);
+  assert.equal(f.state.calls.length, 54, 'Unverified old gateways must not silently ignore the account pin');
+});
+
+test('default CLI starts the local dashboard with no-open, and SIGINT cancels its real active job', async (t) => {
+  const f = await fixture(t);
+  f.state.hang = true;
+  const cli = fileURLToPath(new URL('../bin/sentinel.mjs', import.meta.url));
+  const child = spawn(process.execPath, [cli, '--no-open', '--port', '0', '--base-url', f.options.baseUrl, '--directory', f.directory], { stdio: ['ignore', 'pipe', 'pipe'] });
+  t.after(() => child.kill());
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  const exited = new Promise((resolve, reject) => { child.on('error', reject); child.on('close', resolve); });
+  const url = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('CLI did not start')), 5000);
+    let stdout = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+      const match = /http:\/\/127\.0\.0\.1:\d+/.exec(stdout);
+      if (match) { clearTimeout(timer); resolve(match[0]); }
+    });
+  });
+  const { accounts } = await (await fetch(`${url}/api/accounts`)).json();
+  const request = await fetch(`${url}/api/runs`, { method: 'POST', headers: { origin: url, 'content-type': 'application/json', 'x-sentinel-request': '1' }, body: JSON.stringify({ target: model, profile: 'quick', accountId: accounts[0].id }) });
+  assert.equal(request.status, 202);
+  for (let i = 0; i < 100 && !f.state.calls.length; i++) { await new Promise((resolve) => setTimeout(resolve, 10)); }
+  assert.equal(f.state.calls.length, 1);
+  child.kill('SIGINT');
+  assert.equal(await exited, 0, stderr);
+  const history = await getHistory(f.args);
+  assert.equal(history[0].runStatus, 'cancelled');
+  assert.equal(history[0].persisted, true);
 });
 
 test('stale-lock recovery grants at most one concurrent owner', async (t) => {

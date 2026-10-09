@@ -92,7 +92,7 @@ async function run({ options = {}, apiKey, directory, profile = 'quick', signal,
       report.summary = { planned: probes.length, attempted: report.cases.length, completed: accepted.length };
       if (!report.observed.stable) report.warnings.push('本轮实际路由证据不完整或混用通道，合并的输出指纹不适合归属于单一通道。');
     }
-    report.warnings.push(config.account ? '本次使用 Magpie 的账户固定请求头；报告没有独立认证上游账户身份。' : '未固定账户：结果代表该 Magpie 路由。多账户切换可能影响比较。');
+    report.warnings.push(config.account ? '本次使用 X-Magpie-Account 严格固定账号；Magpie 的契约是不可用时失败，不切换账号。归属依赖网关执行此契约，不是对上游登录身份的独立认证。' : '未固定账户：结果代表该 Magpie 路由。多账户切换可能影响比较。');
     try { report.persisted = true; await saveRun(config.dataDir, report); }
     catch { report.persisted = false; report.warnings.push('最终结果无法保存，请保留当前输出；没有声称磁盘记录已更新。'); }
     return report;
@@ -104,7 +104,8 @@ export function runFingerprint(args = {}) { return run(args, 'fingerprint'); }
 
 export async function getHistory({ options = {}, apiKey, directory, limit = 20 } = {}) {
   const config = normalizeOptions(options, { apiKey, directory, requireTarget: false });
-  return (await listRuns(config.dataDir)).filter((r) => !config.target || r.config?.target === config.target || r.kind === 'unreadable').slice(0, limit);
+  return (await listRuns(config.dataDir)).filter((r) => r.kind === 'unreadable' || ((!config.target || r.config?.target === config.target)
+    && (!config.account || r.config?.accountId === publicConfig(config).accountId))).slice(0, limit);
 }
 
 export async function getRun({ options = {}, apiKey, directory, id } = {}) {

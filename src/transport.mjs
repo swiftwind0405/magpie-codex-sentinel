@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { accountId } from './config.mjs';
 
 export class ProbeError extends Error {
   constructor(code, message, status = null, evidence = {}) {
@@ -160,7 +161,9 @@ export async function parseResponse(response, { maxResponseBytes = 8 * 1024 * 10
 function authHeaders(config, session) {
   const headers = new Headers({ authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json', 'X-Magpie-Response-Model': 'vendor' });
   if (session) headers.set('X-Magpie-Session', session);
-  if (config.account) headers.set('X-Magpie-Account', config.account);
+  // HTTP headers carry bytes. Magpie compares UTF-8 account names (including
+  // workspace suffixes); Fetch's ByteString otherwise corrupts non-ASCII names.
+  if (config.account) { headers.set('X-Magpie-Account', Buffer.from(config.account, 'utf8').toString('latin1')); }
   return headers;
 }
 
@@ -238,4 +241,36 @@ export async function fetchModels(config, { signal, fetchImpl = fetch } = {}) {
   const data = JSON.parse(await limitedText(response, 4 * 1024 * 1024));
   if (!Array.isArray(data.data)) throw new Error('Magpie /models 没有返回 data 数组。');
   return data.data;
+}
+
+/** Magpie's public quota snapshot contains account names, never login tokens. */
+export async function fetchAccounts(config, { fetchImpl = fetch } = {}) {
+  // An old gateway may silently ignore an unknown pin header. Fail closed at
+  // the oldest release whose strict pin contract this plugin has verified.
+  const infoResponse = await fetchImpl(config.baseUrl, { headers: authHeaders(config), signal: AbortSignal.timeout(5000), redirect: 'error' });
+  if (!infoResponse.ok) {
+    await infoResponse.body?.cancel();
+    throw new Error('无法确认 Magpie 版本，已禁止账号检测。');
+  }
+  const info = JSON.parse(await limitedText(infoResponse, 128 * 1024));
+  const match = /^v?(\d+)\.(\d+)\.(\d+)(?:$|[-+])/.exec(info.version || '');
+  const supported = match && (Number(match[1]) > 0 || Number(match[2]) > 1 || (Number(match[2]) === 1 && Number(match[3]) >= 1132));
+  if (info.name !== 'magpie' || !supported) { throw new Error('账号检测需要 Magpie 0.1.1132 或更高版本，以保证严格固定账号。'); }
+  const response = await fetchImpl(`${config.baseUrl}/magpie/quotas`, {
+    headers: authHeaders(config), signal: AbortSignal.timeout(15000), redirect: 'error',
+  });
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new Error(`读取 Codex 账号失败（HTTP ${response.status}）。`);
+  }
+  const data = JSON.parse(await limitedText(response, 4 * 1024 * 1024));
+  if (!Array.isArray(data.data)) { throw new Error('Magpie 账号列表格式无效。'); }
+  const accounts = data.data.filter((row) => row.provider === 'codex' && typeof row.user === 'string' && row.user.trim());
+  return accounts.map((row) => ({
+    id: accountId(config.baseUrl, row.user), name: row.user, plan: row.plan || '',
+    readAt: row.readAt || null, error: typeof row.error === 'string' ? row.error.slice(0, 300) : null,
+    windows: (Array.isArray(row.windows) ? row.windows : []).map((window) => ({
+      name: window.name, remaining: numeric(window.remaining), resetsAt: window.resetsAt || null,
+    })),
+  }));
 }

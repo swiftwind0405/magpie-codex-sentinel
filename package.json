@@ -1,29 +1,18 @@
 {
   "name": "magpie-codex-sentinel",
-  "version": "0.1.0",
-  "description": "Magpie plugin for reproducible Codex capability checks and optional ModelTrace fingerprints",
+  "version": "0.2.0",
+  "description": "Magpie plugin for per-account Codex capability checks in a local dashboard",
   "type": "module",
   "main": "./index.mjs",
-  "exports": { ".": "./index.mjs" },
+  "exports": "./index.mjs",
   "bin": { "codex-sentinel": "./bin/sentinel.mjs" },
   "engines": { "node": ">=22" },
   "scripts": {
     "test": "node --test test/*.test.mjs",
     "start": "node bin/sentinel.mjs",
-    "check": "node --check index.mjs && node --check src/engine.mjs && node --check bin/sentinel.mjs"
+    "check": "node --check src/plugin.mjs && node --check src/web.mjs && node --check web/app.js && node --check src/engine.mjs && node --check bin/sentinel.mjs"
   },
-  "files": ["index.mjs", "src", "bin", "vendor", "docs", "sentinel.config.example.json", "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md"],
-  "keywords": ["magpie-plugin", "opencode-plugin", "codex", "evaluation", "modeltrace"],
-  "license": "MIT",
-  "magpie": {
-    "maxConcurrency": 1,
-    "options": {
-      "baseUrl": "http://127.0.0.1:3425/v1",
-      "target": "",
-      "effort": "high",
-      "seed": "sentinel-v1-reference",
-      "maxOutputTokens": 8192,
-      "timeoutMs": 120000
-    }
-  }
+  "files": ["index.mjs", "src", "web", "bin", "vendor", "docs", "sentinel.config.example.json", "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md"],
+  "keywords": ["magpie-plugin", "codex", "evaluation", "modeltrace"],
+  "license": "MIT"
 }
