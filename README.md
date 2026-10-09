@@ -13,7 +13,23 @@
 - 在 Magpie 中使用插件，由 Magpie 的 Bun 插件运行时执行。单独运行随包 CLI 需要 **Node.js 22 或更高版本**。
 - 本包运行时没有需要额外安装的 npm 依赖，不需要执行 npm install。
 
-### 安装本地目录
+### 从 GitHub 安装（推荐）
+
+直接安装 [v0.1.0](https://github.com/swiftwind0405/magpie-codex-sentinel/releases/tag/v0.1.0)，不需要先下载源码或构建：
+
+~~~bash
+magpie plugin add github:swiftwind0405/magpie-codex-sentinel#v0.1.0
+~~~
+
+这个命令固定安装 v0.1.0。也可以在 **插件 → 发现 → 非官方插件 · GitHub** 中查找 `magpie-codex-sentinel`；发现列表有缓存，新发布的仓库可能稍后才出现。没有版本后缀的 GitHub 安装会使用仓库当前代码：
+
+~~~bash
+magpie plugin add github:swiftwind0405/magpie-codex-sentinel
+~~~
+
+[Magpie 发布与上架文档](https://usemagpie.ai/docs/zh/plugins#publish)说明了 GitHub 发现规则。安装完成后，继续设置下面的真实检测目标并登录网关。
+
+### 安装本地目录（开发或手动下载时）
 
 在解压目录的上一级运行：
 
@@ -25,7 +41,7 @@ magpie plugin add ./magpie-codex-sentinel
 
 ### 复制实际模型 ID
 
-在 Magpie 的模型列表中找到要检测的通道，复制其完整 **provider/model** ID。也可以用随包 CLI 查询：
+在 Magpie 的模型列表中找到要检测的通道，复制其完整 **provider/model** ID。如果已有本地源码，也可以在源码目录用随包 CLI 查询：
 
 ~~~bash
 cd magpie-codex-sentinel
@@ -34,9 +50,18 @@ node bin/sentinel.mjs models --json
 
 不要只写模型简称，不要选择 codex-sentinel 自己的四个诊断模型。插件不预设任何 Codex 模型名称，以你的 Magpie 当前返回的模型列表为准。
 
-### 保存一份不含密钥的配置
+### 设置检测目标
 
-在插件目录复制 `sentinel.config.example.json` 为 `sentinel.config.json`，然后填入真实 target。以下 target 中的尖括号是占位符，必须替换为上一步复制的真实 ID；effort 也应选择该通道实际支持的档位。
+将下面 target 中的 `<provider>/<model>` 替换为上一步复制的真实 ID，effort 选择该通道实际支持的档位，然后直接保存插件选项：
+
+~~~bash
+magpie plugin options magpie-codex-sentinel \
+  '{"target":"<provider>/<model>","effort":"high"}'
+~~~
+
+默认连接本机网关 `http://127.0.0.1:3425/v1`。如果你改过端口，在上面的 JSON 中同时加入实际 `baseUrl`。
+
+如果还需要使用 CLI，可以在自己的工作目录创建一份不含密钥的 `sentinel.config.json`；有本地源码时，也可以复制 `sentinel.config.example.json`。完整配置示例：
 
 ~~~json
 {
@@ -52,7 +77,7 @@ node bin/sentinel.mjs models --json
 
 如果你需要固定 Magpie 中的某个账户，可以增加 account 字段，填写该 Magpie 实例支持的账户选择值。未固定时，结果代表整条路由，可能受到多账户轮换影响。
 
-把这份 JSON 显式保存为插件选项：
+如果使用或修改了这份配置文件，在它所在的目录将 JSON 显式保存为插件选项：
 
 ~~~bash
 magpie plugin options magpie-codex-sentinel "$(cat sentinel.config.json)"
