@@ -34,6 +34,13 @@ async function api(path, body) {
 
 function controls() {
   const busy = Boolean(isActive()) || submitting;
+  document.querySelectorAll('#account-cards [data-account]').forEach((button) => {
+    const chosen = button.dataset.account === $('account').value;
+    button.disabled = busy;
+    button.setAttribute('aria-pressed', String(chosen));
+    button.textContent = chosen ? '已选择' : '选择此账号';
+    button.closest('.account-card').classList.toggle('selected', chosen);
+  });
   $('run-fields').disabled = busy;
   $('start').disabled = busy || !models.length || !$('account').value;
   $('start').innerHTML = busy ? '检测进行中…' : `开始${labels[profile()] === '快速初筛' ? '快速检测' : labels[profile()]} <span aria-hidden="true">↗</span>`;
@@ -78,16 +85,22 @@ function scoreText(run) {
 }
 
 function accountCards() {
+  $('account-count').textContent = `${accounts.length} 个`;
   $('account-cards').innerHTML = accounts.length ? accounts.map((account) => {
     const relevant = runs.filter((run) => run.config?.accountId === account.id && run.kind === 'evaluation'
       && run.config.target === $('model').value && run.config.effort === $('effort').value && run.config.seed === $('seed').value);
     const latest = relevant.find((run) => run.profile === 'standard') || relevant[0];
-    const quota = account.windows.map((window) => `${window.name}：${window.remaining == null ? '未知' : `剩余 ${window.remaining}%`}${window.remaining === 0 && window.resetsAt ? ` · ${date(window.resetsAt)} 重置` : ''}`).join(' / ');
+    const quota = account.windows.map((window) => {
+      const known = window.remaining != null;
+      const label = known ? `剩余 ${window.remaining}%` : '额度未知';
+      return `<div class="quota ${known && window.remaining <= 10 ? 'low' : ''}"><div class="quota-labels"><span>${esc(window.name)}</span><strong>${esc(label)}</strong></div>${known ? `<meter min="0" max="100" value="${esc(window.remaining)}" aria-label="${esc(`${window.name}：${label}`)}">${esc(label)}</meter>` : '<div class="quota-unknown" aria-hidden="true"></div>'}${window.remaining === 0 && window.resetsAt ? `<p class="quota-reset">${esc(date(window.resetsAt))} 重置</p>` : ''}</div>`;
+    }).join('');
     const unavailable = account.windows.some((window) => window.remaining === 0);
     const decline = ['decline_signal', 'repeated_decline'].includes(latest?.verdict?.code);
     const result = latest ? `${labels[latest.profile]} ${date(latest.startedAt)} · ${scoreText(latest)} · ${latest.verdict.label}` : '尚无当前配置的账号检测';
-    return `<article class="account-card ${decline ? 'decline' : ''}"><div><strong>${esc(account.name)}</strong><span class="badge">${esc(account.plan || 'Codex')}</span></div><p class="account-result">${esc(result)}</p><p class="hint">${unavailable ? '额度不足，暂不能检测。' : ''}${esc(quota || account.error || '额度暂未知')}</p><small>额度读取：${esc(date(account.readAt))}</small><div class="account-actions"><button type="button" class="text-button" data-account="${esc(account.id)}">选择此账号</button>${latest ? `<button type="button" class="text-button" data-view="${esc(latest.id)}">查看报告</button>` : ''}</div></article>`;
+    return `<article class="account-card ${decline ? 'decline' : ''}" aria-label="${esc(account.name)}"><div class="account-head"><span class="account-avatar" aria-hidden="true">C</span><strong>${esc(account.name)}</strong><span class="badge">${esc(account.plan || 'Codex')}</span></div>${quota ? `<div class="quota-windows">${quota}</div>` : ''}<p class="account-result ${latest ? '' : 'no-result'}">${esc(result)}</p>${unavailable || account.error || !quota ? `<p class="hint">${unavailable ? '额度不足，暂不能检测。' : ''}${esc(account.error || (!quota ? '额度暂未知' : ''))}</p>` : ''}<small>额度读取：${esc(date(account.readAt))}</small><div class="account-actions"><button type="button" class="text-button" data-account="${esc(account.id)}">选择此账号</button>${latest ? `<button type="button" class="text-button" data-view="${esc(latest.id)}">查看报告</button>` : ''}</div></article>`;
   }).join('') : '<p>Magpie 未返回 Codex 账号。请先在 Magpie 的 Codex provider 登录账号，然后刷新。</p>';
+  controls();
 }
 
 async function loadAccounts() {
@@ -104,8 +117,9 @@ async function loadAccounts() {
     accountCards();
   } catch (error) {
     accounts = [];
+    $('account-count').textContent = '读取失败';
     $('account').replaceChildren(new Option('账号读取失败，请刷新', ''));
-    $('account-cards').textContent = error.message;
+    $('account-cards').innerHTML = `<p>${esc(error.message)}</p>`;
     notice(error.message);
   }
   controls();
@@ -316,6 +330,32 @@ $('baseline').addEventListener('click', async () => {
   } catch (error) { notice(error.message); }
 });
 
+function initAppearance() {
+  let theme = 'system';
+  try { theme = localStorage.getItem('sentinel-theme') || theme; } catch { /* Use the system theme. */ }
+  const apply = (value) => {
+    const valid = ['system', 'light', 'dark'].includes(value) ? value : 'system';
+    $('theme').value = valid;
+    if (valid === 'system') { delete document.documentElement.dataset.theme; }
+    else { document.documentElement.dataset.theme = valid; }
+  };
+  apply(theme);
+  $('theme').addEventListener('change', () => {
+    apply($('theme').value);
+    try { localStorage.setItem('sentinel-theme', $('theme').value); } catch { /* Theme remains usable without storage. */ }
+  });
+  const navigation = () => {
+    const links = [...document.querySelectorAll('.seg a')];
+    const current = links.some((link) => link.hash === location.hash) ? location.hash : '#workspace';
+    links.forEach((link) => {
+      if (link.hash === current) { link.setAttribute('aria-current', 'location'); }
+      else { link.removeAttribute('aria-current'); }
+    });
+  };
+  navigation();
+  window.addEventListener('hashchange', navigation);
+}
+
 async function init() {
   try {
     const state = await syncState();
@@ -339,4 +379,5 @@ async function init() {
   }
   setTimeout(poll, 1500);
 }
+initAppearance();
 init();

@@ -45,6 +45,8 @@ vendor/modeltrace/reference-probes.json 是从固定提交中原始 challenge_su
 
 本包通过 Magpie 公开的 provider 插件接口集成，未打包或复制 Magpie 的程序源码。Magpie/Bun 及其宿主 SDK 由用户自己的 Magpie 安装提供，不属于本包随附的第三方运行时代码。
 
+网页视觉参考另外固定于 [3691c2047dc947495ef5d7d67dd2e2f31639d7b1](https://github.com/yetone/magpie/commit/3691c2047dc947495ef5d7d67dd2e2f31639d7b1) 的 [GUI 样式](https://github.com/yetone/magpie/blob/3691c2047dc947495ef5d7d67dd2e2f31639d7b1/internal/gui/assets/app.css)与 [页面结构](https://github.com/yetone/magpie/blob/3691c2047dc947495ef5d7d67dd2e2f31639d7b1/internal/gui/assets/index.html)，沿用其中的中性底色、强调色和紧凑控件风格。Sentinel 的组件布局、交互代码和 SVG 图形独立实现，未引入 Magpie 的 GUI 脚本、图标或桌面依赖；此视觉参考不改变前述请求行为的核对版本。
+
 ## 本插件自己的代码
 
 除上面明确列出的上游组件及派生数据外，本包新增的插件适配、检测引擎、确定性题目、CLI 和文档按根目录 [LICENSE](LICENSE) 的 MIT 条款提供。第三方文件继续保留原作者版权与许可证。

@@ -335,7 +335,23 @@ async function dashboard(t, f) {
 test('dashboard uses the real HTTP engine, exposes saved reports and blocks cross-origin probe requests', async (t) => {
   const f = await fixture(t);
   const d = await dashboard(t, f);
-  assert.match(await (await d.request('/')).text(), /本地检测台/);
+  const page = await d.request('/');
+  const html = await page.text();
+  assert.match(html, /本地检测台/);
+  const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.equal((await (await d.request('/api/state')).json()).version, manifest.version);
+  // Every section link and script-bound control must resolve uniquely.
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
+  assert.equal(new Set(ids).size, ids.length);
+  for (const [, target] of html.matchAll(/href="#([^"]+)"/g)) { assert.ok(ids.includes(target)); }
+  const script = await d.request('/app.js');
+  assert.equal(script.status, 200);
+  assert.match(script.headers.get('content-type'), /javascript/);
+  for (const [, id] of (await script.text()).matchAll(/\$\('([^']+)'\)/g)) { assert.ok(ids.includes(id), `Missing control: ${id}`); }
+  const stylesheet = await d.request('/style.css');
+  assert.equal(stylesheet.status, 200);
+  assert.match(stylesheet.headers.get('content-type'), /text\/css/);
+  assert.match(page.headers.get('content-security-policy'), /style-src 'self'/);
   assert.equal((await d.request('/src/web.mjs')).status, 404);
   // fetch normalizes Host to the URL; use HTTP directly to exercise rebinding.
   const badHostStatus = await new Promise((resolve, reject) => {

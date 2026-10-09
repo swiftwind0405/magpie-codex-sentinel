@@ -6,7 +6,7 @@
 
 用于检查 **Codex provider 下具体账号表现**的 Magpie 插件。启用后自动打开本地网页，选择账号和模型、运行固定题集、查看逐题证据，并与该账号自己的历史基线比较。可选的 ModelTrace 模块单独提供输出指纹候选。
 
-**v0.2.0** 由 Magpie 管理插件和网页服务，不注册供应商、登录方式或虚拟模型，不需要修改 Magpie。v0.1.0 的聊天模型入口已替换为账号检测网页。
+**v0.2.1** 采用 Magpie 风格的紧凑界面，支持浅色、深色和跟随系统主题，账号卡片显示额度条与选中状态，并支持依次检测全部 Codex 账号。插件和网页服务由 Magpie 管理，不注册供应商、登录方式或虚拟模型，不需要修改 Magpie。v0.1.0 的聊天模型入口已替换为账号检测网页。
 
 ## 1. 安装并打开
 
@@ -19,7 +19,7 @@
 安装固定版本：
 
 ~~~bash
-magpie plugin add github:swiftwind0405/magpie-codex-sentinel#v0.2.0
+magpie plugin add github:swiftwind0405/magpie-codex-sentinel#v0.2.1
 ~~~
 
 也可以在 Magpie「插件」页面从 GitHub 安装 `swiftwind0405/magpie-codex-sentinel`。无需填写 Sentinel 登录信息。开发时仍可用 `magpie plugin add /absolute/path/to/magpie-codex-sentinel` 加载本地源码。
@@ -81,7 +81,7 @@ npm start -- --config sentinel.config.json --port 47822
 用下面的命令替换旧版本，插件会重新启用并打开网页：
 
 ~~~bash
-magpie plugin add github:swiftwind0405/magpie-codex-sentinel#v0.2.0
+magpie plugin add github:swiftwind0405/magpie-codex-sentinel#v0.2.1
 ~~~
 
 旧的 `codex-sentinel/quick` 等虚拟模型不再提供，请在客户端选择正常工作模型。若另外装过本地开发目录，先用 `magpie plugin off /absolute/path/to/magpie-codex-sentinel` 停用该目录，避免同时加载两份插件。
@@ -106,7 +106,7 @@ magpie plugin add github:swiftwind0405/magpie-codex-sentinel#v0.2.0
 
 建议先运行一次 quick，确认目标配置、认证和返回格式都正常，再运行 standard。
 
-在你认为账号工作正常时，使用**同一账号、同一模型/档位、同一 seed**完成至少 3 轮标准检测。在网页「当前账号的检测历史」中勾选这三轮并点击「设为基线」。不同账号必须各自建立参考。CLI 也可以使用历史里的完整 run ID：
+在你认为账号工作正常时，使用**同一账号、同一模型/档位、同一 seed**完成至少 3 轮标准检测。在网页顶部点击「历史记录」，在「检测历史」中勾选这三轮并点击「设为基线」。不同账号必须各自建立参考。CLI 也可以使用历史里的完整 run ID：
 
 ~~~text
 node bin/sentinel.mjs baseline ID1 ID2 ID3
