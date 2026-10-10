@@ -254,8 +254,9 @@ export async function fetchAccounts(config, { fetchImpl = fetch } = {}) {
   }
   const info = JSON.parse(await limitedText(infoResponse, 128 * 1024));
   const match = /^v?(\d+)\.(\d+)\.(\d+)(?:$|[-+])/.exec(info.version || '');
-  const supported = match && (Number(match[1]) > 0 || Number(match[2]) > 1 || (Number(match[2]) === 1 && Number(match[3]) >= 1132));
-  if (info.name !== 'magpie' || !supported) { throw new Error('账号检测需要 Magpie 0.1.1132 或更高版本，以保证严格固定账号。'); }
+  // v0.1.1111 contains the strict-pin implementation and its no-fallback tests.
+  const supported = match && (Number(match[1]) > 0 || Number(match[2]) > 1 || (Number(match[2]) === 1 && Number(match[3]) >= 1111));
+  if (info.name !== 'magpie' || !supported) { throw new Error(`账号检测需要 Magpie 0.1.1111 或更高版本，以保证严格固定账号；当前网关报告 ${String(info.version || '未知版本').slice(0, 80)}。`); }
   const response = await fetchImpl(`${config.baseUrl}/magpie/quotas`, {
     headers: authHeaders(config), signal: AbortSignal.timeout(15000), redirect: 'error',
   });

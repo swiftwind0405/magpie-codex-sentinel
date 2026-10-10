@@ -290,3 +290,24 @@ footer { display: flex; justify-content: space-between; gap: 20px; padding-top: 
   .batch-results { padding: 14px; }
   footer { flex-direction: column; gap: 4px; }
 }
+.login-page { max-width: 520px; margin: 6vh auto; padding: 20px; }
+.login-page .panel { padding: 30px; }
+.login-page h1 { margin: 12px 0 8px; font-size: 26px; }
+.login-brand-note { margin-left: 8px; color: var(--muted); letter-spacing: 0; }
+.login-intro { color: var(--fg-2); line-height: 1.7; }
+.login-guide { margin: 24px 0; padding: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--card-2); }
+.login-guide h2 { margin: 0 0 8px; font-size: 14px; }
+.login-guide p, .login-help p { margin: 8px 0 0; font-size: 13px; line-height: 1.8; }
+.login-guide-detail { color: var(--muted); }
+.login-page code { color: var(--accent); overflow-wrap: anywhere; }
+.login-page input { width: 100%; min-height: 42px; }
+.login-page .primary { margin-top: 12px; width: 100%; min-height: 42px; }
+.login-help { border-top: 1px solid var(--line); padding-top: 16px; }
+.login-help summary { cursor: pointer; color: var(--fg-2); font-size: 13px; }
+.login-help p { color: var(--muted); }
+.login-footnote { margin: 24px 0 0; color: var(--muted); font-size: 11px; line-height: 1.8; }
+#login-error { color: var(--red); min-height: 1.5em; font-size: 13px; }
+@media (max-width: 520px) {
+  .login-page { margin: 20px auto; padding: 12px; }
+  .login-page .panel { padding: 22px; }
+}

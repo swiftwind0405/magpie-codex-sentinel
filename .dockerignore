@@ -1,0 +1,9 @@
+.git
+node_modules
+test
+*.tgz
+*.log
+sentinel.config.json
+local-options.json
+deploy/secrets
+deploy/.env

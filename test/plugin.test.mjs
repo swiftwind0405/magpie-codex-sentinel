@@ -2,11 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createAccess } from '../src/access.mjs';
 
-test('plugin serves a page without provider hooks, shares one port between hosts and takes over when the owner exits', async (t) => {
+for (const remote of [false, true]) {
+test(`plugin ${remote ? 'remote' : 'local'} serves without provider hooks, shares one port and takes over after owner exit`, async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'sentinel-plugin-'));
   const reservation = createServer();
   await new Promise((resolve) => reservation.listen(0, '127.0.0.1', resolve));
@@ -19,9 +21,17 @@ test('plugin serves a page without provider hooks, shares one port between hosts
     await rm(directory, { recursive: true, force: true });
   });
   const url = `http://127.0.0.1:${port}`;
+  const options = { port, open: false };
+  if (remote) {
+    options.remoteOrigin = 'https://sentinel.example.test';
+    options.passwordFile = join(directory, 'password');
+    await writeFile(options.passwordFile, 'plugin-remote-fixture-password', { mode: 0o600 });
+  }
+  const access = await createAccess(options);
+  const readState = () => remote ? access.peerState(port) : fetch(url + '/api/state', { signal: AbortSignal.timeout(500) }).then((response) => response.json());
   async function host() {
     const source = `import plugin from ${JSON.stringify(new URL('../index.mjs', import.meta.url).href)};
-      const hooks = await plugin(${JSON.stringify({ directory })}, ${JSON.stringify({ port, open: false })});
+      const hooks = await plugin(${JSON.stringify({ directory })}, ${JSON.stringify(options)});
       console.log('HOOKS:' + JSON.stringify(hooks));
       process.stdin.resume();`;
     const child = spawn(process.execPath, ['--input-type=module', '-e', source], { stdio: ['pipe', 'pipe', 'pipe'] });
@@ -43,18 +53,18 @@ test('plugin serves a page without provider hooks, shares one port between hosts
     return child;
   }
   const first = await host();
-  const firstState = await (await fetch(url + '/api/state')).json();
+  const firstState = await readState();
   assert.equal(firstState.mode, 'plugin');
   assert.equal(firstState.job, null, 'Loading the plugin must not start paid checks');
-  assert.match(await (await fetch(url)).text(), /Codex 账号/);
+  if (!remote) { assert.match(await (await fetch(url)).text(), /Codex 账号/); }
   const second = await host();
-  assert.equal((await (await fetch(url + '/api/state')).json()).serviceId, firstState.serviceId);
+  assert.equal((await readState()).serviceId, firstState.serviceId);
   first.kill();
   await first.closed;
   let resumed = false;
   for (let i = 0; i < 40; i++) {
     try {
-      const state = await (await fetch(url + '/api/state', { signal: AbortSignal.timeout(200) })).json();
+      const state = await readState();
       resumed = state.mode === 'plugin' && state.serviceId === firstState.serviceId;
       if (resumed) { break; }
     } catch { /* The second host checks ownership every two seconds. */ }
@@ -65,3 +75,4 @@ test('plugin serves a page without provider hooks, shares one port between hosts
   await second.closed;
   await assert.rejects(fetch(url + '/api/state', { signal: AbortSignal.timeout(500) }));
 });
+}

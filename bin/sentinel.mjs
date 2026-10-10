@@ -24,6 +24,9 @@ const help = `Codex Sentinel · 本地模型检测台
   --config FILE                  从 JSON 文件读取检测配置
   --no-open                      启动网页服务但不自动打开浏览器
   --port N                       网页端口，默认 47821；0 表示自动分配
+  --remote-origin HTTPS_ORIGIN   开启登录保护的远程网页（HTTPS 反向代理）
+  --password-file FILE           远程网页访问密码文件，至少 16 字符
+  --remote-bind IP               远程监听 0.0.0.0（默认）或 127.0.0.1
   --target PROVIDER/MODEL         目标；必须从 models 列表选择
   --effort high                   请求推理档位；default 表示不显式发送
   --account EMAIL_OR_ID           通过 Magpie 的账户固定请求头指定订阅账户
@@ -51,7 +54,7 @@ function parse(argv) {
   if (argv[0] === '-h') { result.command = 'help'; }
   if (result.command === '--help' || result.command === '-h') result.command = 'help';
   const booleans = new Set(['json', 'allow-remote', 'force', 'help', 'no-open']);
-  const values = new Set(['config', 'target', 'effort', 'account', 'seed', 'base-url', 'directory', 'data-dir', 'timeout-ms', 'run-timeout-ms', 'max-output-tokens', 'max-response-bytes', 'profile', 'out', 'format', 'port']);
+  const values = new Set(['config', 'target', 'effort', 'account', 'seed', 'base-url', 'directory', 'data-dir', 'timeout-ms', 'run-timeout-ms', 'max-output-tokens', 'max-response-bytes', 'profile', 'out', 'format', 'port', 'remote-origin', 'password-file', 'remote-bind']);
   for (let i = argv[0]?.startsWith('--') ? 0 : 1; i < argv.length; i++) {
     const item = argv[i];
     if (!item.startsWith('--')) { result.positionals.push(item); continue; }
@@ -75,14 +78,17 @@ async function main() {
   for (const [flag, key] of Object.entries(mapping)) if (flags[flag] !== undefined) options[key] = /^(timeout|run-timeout|max-output|max-response)/.test(flag) ? Number(flags[flag]) : flags[flag];
   if (args.command === 'ui') {
     if (args.positionals.length) { throw new Error('ui 不接受额外的位置参数。'); }
-    const dashboard = await startDashboard({ options, directory: flags.directory ? resolve(flags.directory) : undefined, port: flags.port === undefined ? 47821 : Number(flags.port) });
+    for (const [flag, key] of Object.entries({ 'remote-origin': 'remoteOrigin', 'password-file': 'passwordFile', 'remote-bind': 'remoteBind' })) {
+      if (flags[flag] !== undefined) { options[key] = flags[flag]; }
+    }
+    const dashboard = await startDashboard({ options, directory: flags.directory ? resolve(flags.directory) : undefined, port: flags.port === undefined ? (options.port ?? 47821) : Number(flags.port) });
     process.stdout.write(`Codex Sentinel 已启动：${dashboard.url}\n关闭网页不会中断检测；在此终端按 Ctrl+C 停止服务和当前检测。\n`);
     const stopped = new Promise((resolveStop) => {
       const stop = () => { process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); resolveStop(); };
       process.once('SIGINT', stop);
       process.once('SIGTERM', stop);
     });
-    if (!flags['no-open']) {
+    if (!dashboard.remote && !flags['no-open']) {
       openBrowser(dashboard.url).catch(() => { process.stderr.write(`未能自动打开浏览器，请访问 ${dashboard.url}\n`); });
     }
     await stopped;

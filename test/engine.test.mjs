@@ -337,7 +337,7 @@ test('dashboard uses the real HTTP engine, exposes saved reports and blocks cros
   const d = await dashboard(t, f);
   const page = await d.request('/');
   const html = await page.text();
-  assert.match(html, /本地检测台/);
+  assert.match(html, /Codex Sentinel · 账号检测台/);
   const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
   assert.equal((await (await d.request('/api/state')).json()).version, manifest.version);
   // Every section link and script-bound control must resolve uniquely.
@@ -551,6 +551,7 @@ test('all-account run rejects empty, duplicate and changed lists before any prob
 
 test('account selection pins the named account, separates history and rejects mixed-account baselines', async (t) => {
   const f = await fixture(t);
+  f.state.gatewayVersion = 'v0.1.1111';
   f.state.accounts[1].user = 'second@example.test · 团队';
   const d = await dashboard(t, f);
   const runs = [];
@@ -578,7 +579,9 @@ test('account selection pins the named account, separates history and rejects mi
   assert.equal((await d.request('/api/runs', { target: model, profile: 'quick', accountId: d.accounts[1].id })).status, 400);
   assert.equal(f.state.calls.length, 54, 'A removed account must never fall back to an existing account');
   f.state.gatewayVersion = '0.1.1000';
-  assert.equal((await d.request('/api/runs', { target: model, profile: 'quick', accountId: d.accounts[0].id })).status, 502);
+  const oldGateway = await d.request('/api/runs', { target: model, profile: 'quick', accountId: d.accounts[0].id });
+  assert.equal(oldGateway.status, 502);
+  assert.match((await oldGateway.json()).error, /当前网关报告 0\.1\.1000/);
   assert.equal(f.state.calls.length, 54, 'Unverified old gateways must not silently ignore the account pin');
 });
 

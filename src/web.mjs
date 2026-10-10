@@ -6,11 +6,14 @@ import { normalizeOptions, VERSION, hash, accountId } from './config.mjs';
 import { fetchModels, fetchAccounts } from './transport.mjs';
 import { runEvaluation, runFingerprint, getHistory, getRun, setBaseline, formatReport } from './engine.mjs';
 import { renderHtml } from './report.mjs';
+import { createAccess } from './access.mjs';
 
 const assets = new Map([
   ['/', ['index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
   ['/style.css', ['style.css', 'text/css; charset=utf-8']],
+  ['/login', ['login.html', 'text/html; charset=utf-8']],
+  ['/login.js', ['login.js', 'text/javascript; charset=utf-8']],
 ]);
 
 function failure(status, message) {
@@ -41,8 +44,9 @@ function send(response, status, body, type = 'application/json; charset=utf-8') 
 }
 
 /** Only the local service owns jobs and credentials; the browser is a view. */
-export async function startDashboard({ options = {}, directory, apiKey, port = 47821, mode = 'cli' } = {}) {
+export async function startDashboard({ options = {}, directory, apiKey, port = 47821, mode = 'cli', access } = {}) {
   if (!Number.isInteger(port) || port < 0 || port > 65535) { throw new Error('port 必须是 0–65535 的整数。'); }
+  access ??= await createAccess(options);
   const config = normalizeOptions(options, { directory, apiKey, requireTarget: false });
   const common = { options, directory, apiKey: config.apiKey };
   const serviceId = hash(`${config.dataDir}\n${config.baseUrl}`);
@@ -105,23 +109,61 @@ export async function startDashboard({ options = {}, directory, apiKey, port = 4
     response.setHeader('cache-control', 'no-store');
     response.setHeader('x-content-type-options', 'nosniff');
     response.setHeader('referrer-policy', 'no-referrer');
+    if (access.remote) { response.setHeader('strict-transport-security', 'max-age=31536000'); }
     response.setHeader('content-security-policy', "default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
+    const url = new URL(request.url, origin);
+    const path = url.pathname;
+    const entryNavigation = access.remote && request.method === 'GET' && ['/', '/login'].includes(path)
+      && request.headers['sec-fetch-mode'] === 'navigate' && request.headers['sec-fetch-dest'] === 'document';
     // Host validation prevents DNS rebinding; mutations require our own origin
     // and a custom header, so another website cannot start a paid probe.
     if (request.headers.host !== new URL(origin).host
       || (request.headers.origin && request.headers.origin !== origin)
-      || request.headers['sec-fetch-site'] === 'cross-site') {
-      throw failure(403, '仅接受本地检测页面的请求。');
+      || (request.headers['sec-fetch-site'] === 'cross-site' && !entryNavigation)) {
+      throw failure(403, '仅接受配置的检测页面来源。');
     }
-    const url = new URL(request.url, origin);
-    const path = url.pathname;
+    if (access.remote && request.method === 'GET' && path === '/' && url.searchParams.has('k')) {
+      try {
+        await access.login(request, response, { password: url.searchParams.get('k') });
+      } catch (error) {
+        if (![401, 429].includes(error.status)) { throw error; }
+        response.writeHead(303, { location: error.status === 429 ? '/login?error=rate_limited' : '/login?error=invalid_key' });
+        response.end(); return;
+      }
+      response.writeHead(303, { location: '/' });
+      response.end(); return;
+    }
+    if (request.method === 'POST' && (request.headers.origin !== origin || request.headers['x-sentinel-request'] !== '1')) {
+      throw failure(403, '请从检测页面发起操作。');
+    }
+    if (access.remote && request.method === 'POST' && path === '/api/login') {
+      await access.login(request, response, await readBody(request));
+      send(response, 200, { ok: true });
+      return;
+    }
+    const publicAsset = request.method === 'GET' && ['/login', '/login.js', '/style.css'].includes(path);
+    if (access.remote && !publicAsset && !access.authenticated(request)) {
+      if (request.method === 'GET' && path === '/') {
+        response.writeHead(303, { location: '/login' }); response.end(); return;
+      }
+      throw failure(401, '请先登录检测台。');
+    }
+    if (access.remote && request.method === 'POST' && path === '/api/logout') {
+      await readBody(request);
+      access.logout(request, response);
+      send(response, 200, { ok: true });
+      return;
+    }
+    if (!access.remote && path === '/login') {
+      response.writeHead(303, { location: '/' }); response.end(); return;
+    }
     if (request.method === 'GET' && assets.has(path)) {
       const [file, type] = assets.get(path);
       send(response, 200, await readFile(new URL(`../web/${file}`, import.meta.url)), type);
       return;
     }
     if (request.method === 'GET' && path === '/api/state') {
-      send(response, 200, { product: 'codex-sentinel', version: VERSION, serviceId, mode, gateway: config.baseUrl, defaults: { target: config.target, effort: config.effort, seed: config.seed, accountId: accountId(config.baseUrl, config.account) }, job: snapshot() });
+      send(response, 200, { product: 'codex-sentinel', version: VERSION, serviceId, mode, remote: access.remote, gateway: config.baseUrl, defaults: { target: config.target, effort: config.effort, seed: config.seed, accountId: accountId(config.baseUrl, config.account) }, job: snapshot() });
       return;
     }
     if (request.method === 'GET' && path === '/api/models') {
@@ -218,11 +260,13 @@ export async function startDashboard({ options = {}, directory, apiKey, port = 4
 
   await new Promise((resolve, reject) => {
     server.once('error', reject);
-    server.listen(port, '127.0.0.1', resolve);
+    server.listen(port, access.bind, resolve);
   });
-  origin = `http://127.0.0.1:${server.address().port}`;
+  origin = access.origin || `http://127.0.0.1:${server.address().port}`;
   return {
     url: origin,
+    port: server.address().port,
+    remote: access.remote,
     async close() {
       closing = true;
       controller?.abort(new DOMException('Service stopped', 'AbortError'));

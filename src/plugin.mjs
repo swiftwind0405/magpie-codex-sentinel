@@ -2,6 +2,7 @@ import { readFile, writeFile, mkdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { normalizeOptions, hash, defaultDirectory, VERSION } from './config.mjs';
 import { startDashboard, openBrowser } from './web.mjs';
+import { createAccess } from './access.mjs';
 
 let companion;
 
@@ -19,24 +20,25 @@ export default async function CodexSentinelPlugin(input = {}, options = {}) {
   const config = normalizeOptions(configured, { directory, requireTarget: false });
   const serviceId = hash(`${config.dataDir}\n${config.baseUrl}`);
   const url = `http://127.0.0.1:${port}`;
+  const access = await createAccess(configured);
   let app;
   let starting = false;
   async function ensure() {
     if (app || starting) { return; }
     starting = true;
     try {
-      try { app = await startDashboard({ options: configured, directory, port, mode: 'plugin' }); }
+      try { app = await startDashboard({ options: configured, directory, port, mode: 'plugin', access }); }
       catch (error) {
         if (error.code !== 'EADDRINUSE') { throw error; }
         let state;
-        try { state = await (await fetch(`${url}/api/state`, { signal: AbortSignal.timeout(1500) })).json(); }
+        try { state = access.remote ? await access.peerState(port) : await (await fetch(`${url}/api/state`, { signal: AbortSignal.timeout(1500) })).json(); }
         catch { throw new Error(`Sentinel 端口 ${port} 被其他服务占用；请修改插件 port 选项。`); }
-        if (state.product !== 'codex-sentinel' || state.serviceId !== serviceId || state.mode !== 'plugin' || state.version !== VERSION) {
+        if (state.product !== 'codex-sentinel' || state.serviceId !== serviceId || state.mode !== 'plugin' || state.version !== VERSION || state.remote !== access.remote) {
           throw new Error(`Sentinel 端口 ${port} 已被其他服务占用；请关闭旧服务或修改插件 port。`);
         }
         return; // Another Magpie host owns it; take over if that host exits.
       }
-      if (options.open !== false) {
+      if (!access.remote && options.open !== false) {
         try {
           const stamp = join(config.dataDir, '.browser-opened');
           await mkdir(config.dataDir, { recursive: true, mode: 0o700 });
@@ -48,7 +50,7 @@ export default async function CodexSentinelPlugin(input = {}, options = {}) {
           }
         } catch { console.error(`Codex Sentinel 无法自动打开浏览器，请手动访问 ${url}`); }
       }
-      console.info(`Codex Sentinel: ${url}`);
+      console.info(`Codex Sentinel: ${app.url}`);
     } finally { starting = false; }
   }
   await ensure();

@@ -10,9 +10,9 @@
   "scripts": {
     "test": "node --test test/*.test.mjs",
     "start": "node bin/sentinel.mjs",
-    "check": "node --check src/plugin.mjs && node --check src/web.mjs && node --check web/app.js && node --check src/engine.mjs && node --check bin/sentinel.mjs"
+    "check": "node --check src/access.mjs && node --check src/plugin.mjs && node --check src/web.mjs && node --check web/app.js && node --check web/login.js && node --check src/engine.mjs && node --check bin/sentinel.mjs"
   },
-  "files": ["index.mjs", "src", "web", "bin", "vendor", "docs", "sentinel.config.example.json", "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md"],
+  "files": ["index.mjs", "src", "web", "bin", "vendor", "docs", "Dockerfile", ".dockerignore", "deploy/compose.yaml", "deploy/Caddyfile", "deploy/.env.example", "sentinel.config.example.json", "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md"],
   "keywords": ["magpie-plugin", "codex", "evaluation", "modeltrace"],
   "license": "MIT"
 }

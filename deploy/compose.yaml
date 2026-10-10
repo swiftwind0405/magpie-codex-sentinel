@@ -1,0 +1,41 @@
+# Linux VPS: use the host's existing loopback-published Magpie gateway.
+services:
+  sentinel:
+    build:
+      context: ..
+    restart: unless-stopped
+    network_mode: host
+    command: ["--port", "47822", "--base-url", "http://127.0.0.1:3425/v1"]
+    environment:
+      SENTINEL_REMOTE_ORIGIN: https://${SENTINEL_DOMAIN:?Set SENTINEL_DOMAIN in deploy/.env}
+      SENTINEL_REMOTE_BIND: 127.0.0.1
+      SENTINEL_PASSWORD_FILE: /run/secrets/sentinel_password
+      MAGPIE_GATEWAY_KEY: ${MAGPIE_GATEWAY_KEY:-magpie}
+    secrets:
+      - sentinel_password
+    volumes:
+      - sentinel_data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  # Optional: omit this profile when an existing proxy owns ports 80/443.
+  caddy:
+    image: caddy:2-alpine
+    profiles: [https]
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      SENTINEL_DOMAIN: ${SENTINEL_DOMAIN:?Set SENTINEL_DOMAIN in deploy/.env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+secrets:
+  sentinel_password:
+    file: ./secrets/sentinel-password
+volumes:
+  sentinel_data:
+  caddy_data:
+  caddy_config:

@@ -5,6 +5,8 @@ const statuses = { pass: '通过', wrong_answer: '答案不符', invalid_format:
 const familyNames = { candy: '组合保证', 'js-trace': '代码跟踪', constraint: '约束逻辑' };
 let models = [];
 let accounts = [];
+let accountsError = '';
+let accountsLoading = true;
 let runs = [];
 let job = null;
 let seenJob = null;
@@ -27,6 +29,10 @@ async function api(path, body) {
   const response = await fetch(path, body === undefined ? { cache: 'no-store', signal: AbortSignal.timeout(15000) } : {
     method: 'POST', headers: { 'content-type': 'application/json', 'x-sentinel-request': '1' }, body: JSON.stringify(body), signal: AbortSignal.timeout(15000),
   });
+  if (response.status === 401) { location.replace('/login'); }
+  if (!response.headers.get('content-type')?.includes('application/json')) {
+    throw new Error(`检测服务或反向代理返回 HTTP ${response.status}，未返回有效数据。请检查服务日志后刷新。`);
+  }
   const result = await response.json();
   if (!response.ok) { throw new Error(result.error || '请求失败。'); }
   return result;
@@ -42,11 +48,11 @@ function controls() {
     button.closest('.account-card').classList.toggle('selected', chosen);
   });
   $('run-fields').disabled = busy;
-  $('start').disabled = busy || !models.length || !$('account').value;
+  $('start').disabled = busy || accountsLoading || !models.length || !$('account').value;
   $('start').innerHTML = busy ? '检测进行中…' : `开始${labels[profile()] === '快速初筛' ? '快速检测' : labels[profile()]} <span aria-hidden="true">↗</span>`;
-  $('start-all').disabled = busy || !models.length || !accounts.length;
+  $('start-all').disabled = busy || accountsLoading || !models.length || !accounts.length;
   $('start-all').textContent = `全部检测 · ${accounts.length} 个账号`;
-  $('refresh-accounts').disabled = busy;
+  $('refresh-accounts').disabled = busy || accountsLoading;
   $('cancel').hidden = !isActive();
   $('cancel').disabled = job?.status === 'cancelling';
   $('cancel').textContent = job?.status === 'cancelling' ? '正在停止并保存结果…' : job?.scope === 'all' ? '停止全部检测' : '停止本轮检测';
@@ -85,6 +91,12 @@ function scoreText(run) {
 }
 
 function accountCards() {
+  if (accountsLoading || accountsError) {
+    $('account-count').textContent = accountsLoading ? '读取中' : '读取失败';
+    $('account-cards').textContent = accountsLoading ? '正在读取 Magpie 账号…' : accountsError;
+    controls();
+    return;
+  }
   $('account-count').textContent = `${accounts.length} 个`;
   $('account-cards').innerHTML = accounts.length ? accounts.map((account) => {
     const relevant = runs.filter((run) => run.config?.accountId === account.id && run.kind === 'evaluation'
@@ -104,6 +116,9 @@ function accountCards() {
 }
 
 async function loadAccounts() {
+  accountsLoading = true;
+  accountsError = '';
+  accountCards();
   try {
     const data = await api('/api/accounts');
     accounts = [...new Map(data.accounts.map((account) => [account.id, account])).values()];
@@ -114,15 +129,14 @@ async function loadAccounts() {
     $('account').value = accounts.some((account) => account.id === preferred) ? preferred : accounts.find((account) => !account.windows.some((window) => window.remaining === 0))?.id || accounts[0]?.id || '';
     if (!accounts.length) { $('account').add(new Option('暂无 Codex 账号', '')); }
     renderHistory();
-    accountCards();
   } catch (error) {
     accounts = [];
-    $('account-count').textContent = '读取失败';
+    accountsError = error.message;
     $('account').replaceChildren(new Option('账号读取失败，请刷新', ''));
-    $('account-cards').innerHTML = `<p>${esc(error.message)}</p>`;
     notice(error.message);
   }
-  controls();
+  accountsLoading = false;
+  accountCards();
 }
 
 async function loadModels() {
@@ -360,6 +374,7 @@ async function init() {
   try {
     const state = await syncState();
     defaults = state.defaults;
+    $('access-mode').textContent = state.remote ? '远程访问 · 已登录' : '本地运行';
     $('version').textContent = `v${state.version}`;
     $('gateway-address').textContent = state.gateway.replace(/^http:\/\//, '');
     if (!isActive()) {
@@ -371,10 +386,10 @@ async function init() {
     await loadModels();
     await loadAccounts();
     await history();
-  } catch (error) { notice(`本地服务暂不可用：${error.message}`); }
+  } catch (error) { notice(`检测服务暂不可用：${error.message}`); }
   async function poll() {
     try { await syncState(); }
-    catch { connectionLost = true; notice('本地服务连接中断。请确认 Magpie 插件仍启用，恢复后刷新页面。'); }
+    catch { connectionLost = true; notice('检测服务连接中断。请确认 Magpie 插件仍启用，恢复后刷新页面。'); }
     setTimeout(poll, 1500);
   }
   setTimeout(poll, 1500);

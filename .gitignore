@@ -4,3 +4,5 @@ node_modules/
 coverage/
 local-options.json
 sentinel.config.json
+deploy/.env
+deploy/secrets/

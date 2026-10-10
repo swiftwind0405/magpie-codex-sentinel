@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>登录 · Codex Sentinel</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/login.js" defer></script>
+</head>
+<body>
+  <main class="login-page">
+    <section class="panel" aria-labelledby="login-title">
+      <p class="eyebrow">CODEX SENTINEL <span class="login-brand-note">for Magpie</span></p>
+      <h1 id="login-title">登录账号检测台</h1>
+      <p class="login-intro">使用部署时配置的访问密钥登录，无需注册或输入用户名。</p>
+      <aside class="login-guide" aria-labelledby="key-guide-title">
+        <h2 id="key-guide-title">用 Magpie 的哪个密钥？</h2>
+        <p>沿用 Magpie 网页访问密钥时，请输入 Docker 部署配置中的 <code>MAGPIE_WEB_KEY</code> 的值。</p>
+        <p class="login-guide-detail">这是打开 Magpie 网页时使用的固定访问密钥。不要填写模型 API 的网关密钥或 Codex 账号密码。</p>
+      </aside>
+      <form id="login-form">
+        <label class="field-label" for="password">访问密钥 / 密码</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" placeholder="粘贴访问密钥的值" aria-describedby="password-help login-error" required maxlength="1024" autofocus>
+        <p id="password-help" class="hint">填写密钥的实际内容，不是文字“MAGPIE_WEB_KEY”。</p>
+        <button class="primary" id="login" type="submit">进入检测台 <span aria-hidden="true">↗</span></button>
+        <p id="login-error" role="alert" aria-live="polite"></p>
+      </form>
+      <details class="login-help">
+        <summary>找不到密钥，或使用了独立密码？</summary>
+        <p>已有带密钥的链接？直接打开管理员提供的 <code>/?k=访问密钥</code> 链接即可进入，验证后地址栏会自动清除密钥。</p>
+        <p>自己部署：在部署 Magpie 的 <code>compose.yaml</code>、<code>docker-compose.yml</code> 或对应的 <code>.env</code> 中，查找 <code>MAGPIE_WEB_KEY</code> 的配置值。</p>
+        <p>他人部署：向管理员索取此检测台的访问密钥。如果管理员为 Sentinel 单独设置了密码，请使用该密码。</p>
+        <p>本机插件默认免登录；只有开启远程访问保护后才会显示此页。</p>
+      </details>
+      <p class="login-footnote">登录有效期 12 小时 · 检测记录保存在运行服务的机器上</p>
+    </section>
+  </main>
+</body>
+</html>

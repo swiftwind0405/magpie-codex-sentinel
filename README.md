@@ -12,7 +12,7 @@
 
 ### 准备条件
 
-- Magpie **0.1.1132 或更新版本**正在运行，Codex provider 已登录账号。旧版本不会进入网页账号检测，避免忽略固定账号请求头后误归属结果。
+- Magpie **0.1.1111 或更新版本**正在运行，Codex provider 已登录账号。更旧或无法识别的版本不会进入网页账号检测，避免忽略固定账号请求头后误归属结果。当前源码已核对 v0.1.1111 的严格固定账号契约；已发布的 v0.2.1 仍要求 0.1.1132。
 - 插件使用 Magpie 自带的 Bun，不需要单独安装 Node。只有 CLI 和开发测试需要 **Node.js 22+**。
 - 当前源码没有运行时 npm 依赖，不需要构建或执行 npm install。
 
@@ -22,7 +22,7 @@
 magpie plugin add github:swiftwind0405/magpie-codex-sentinel#v0.2.1
 ~~~
 
-也可以在 Magpie「插件」页面从 GitHub 安装 `swiftwind0405/magpie-codex-sentinel`。无需填写 Sentinel 登录信息。开发时仍可用 `magpie plugin add /absolute/path/to/magpie-codex-sentinel` 加载本地源码。
+也可以在 Magpie「插件」页面从 GitHub 安装 `swiftwind0405/magpie-codex-sentinel`。默认本地模式无需填写 Sentinel 登录信息。开发时仍可用 `magpie plugin add /absolute/path/to/magpie-codex-sentinel` 加载本地源码。
 
 浏览器会自动打开 **http://127.0.0.1:47821**。页面列出 Codex 账号、额度和当前配置下的最近标准检测；没有标准记录时显示快速初筛。选择账号、模型和推理强度，再点击开始。安装、打开网页和刷新列表都不会启动推理。
 
@@ -31,7 +31,7 @@ magpie plugin add github:swiftwind0405/magpie-codex-sentinel#v0.2.1
 批次列表显示每个账号的等待、检测中、已完成或未完成状态，可直接查看已生成的报告。刷新或关闭网页后批次继续；退出 Magpie 后不会自动续跑，已写入的报告可从账号历史查看。启动前账号列表若发生变化，需要刷新列表后重新开始。
 
 - 自动读取 Magpie 配置中的网关端口，使用默认本机认证，不显示密钥输入框。
-- 服务只监听 127.0.0.1，网关密钥留在服务进程中，不传给浏览器。
+- 默认本地模式只监听 127.0.0.1，网关密钥留在服务进程中，不传给浏览器。
 - 关闭或刷新网页不会取消正在进行的检测；再次打开可以恢复当前进度。
 - 点击「停止本轮检测」取消当前任务并保存状态。停用、更新插件或退出 Magpie 会关闭宿主；保留已写入的逐题记录，未完成记录不能用于下降判断。
 - 重复宿主共用同一端口；原宿主退出后另一个宿主接管。30 秒内不重复弹出浏览器。
@@ -42,6 +42,18 @@ magpie plugin add github:swiftwind0405/magpie-codex-sentinel#v0.2.1
 ~~~bash
 magpie plugin options magpie-codex-sentinel '{"open":false,"port":47822}'
 ~~~
+
+### 可选：带登录保护的远程访问
+
+当前源码支持远程网页与 VPS Docker 部署（尚未包含在上面的 v0.2.1 发布包中）。详见 [远程部署指南](docs/REMOTE.md)。默认本地使用方式不变；远程模式需要专用 HTTPS 域名、反向代理和至少 16 字符的访问密码文件。
+
+~~~bash
+npm start -- --remote-origin https://sentinel.example.com --password-file /secure/sentinel-password --remote-bind 127.0.0.1 --port 47822
+~~~
+
+也可通过插件选项 remoteOrigin、passwordFile、remoteBind 配置，或使用 SENTINEL_REMOTE_ORIGIN、SENTINEL_PASSWORD_FILE、SENTINEL_REMOTE_BIND 环境变量。远程模式不自动打开浏览器；访问配置的 HTTPS 域名后登录，账号、历史、报告导出及检测操作都需要有效会话。会话 12 小时到期，退出或服务重启后失效。退出登录不取消已开始的检测。
+
+remoteOrigin 控制**浏览器如何访问 Sentinel**；原有 allowRemote / --allow-remote 控制 **Sentinel 如何连接远程 Magpie 网关**，两者用途不同。Docker 可以连接 VPS 本机已有的 Magpie 网关，不需要修改 Magpie。
 
 ### 自定义网关与复现设置
 
