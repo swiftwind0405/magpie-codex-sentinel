@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { accountId } from './config.mjs';
+import { outputShape, redact, upstreamDiagnostic } from './diagnostics.mjs';
 
 export class ProbeError extends Error {
   constructor(code, message, status = null, evidence = {}) {
@@ -19,13 +20,13 @@ function failureCode(status, error = {}) {
   return 'upstream_error';
 }
 
-function responseFailure(payload, evidence = {}) {
+function responseFailure(payload, evidence = {}, config = {}) {
   const error = payload.response?.error ?? payload.error ?? payload;
   const status = [error.status, error.status_code, error.code, payload.status_code].find(Number.isInteger) ?? null;
   const code = failureCode(status, error);
   const message = code === 'rate_limited' ? '上游报告限流或额度不足。'
     : code === 'auth_error' ? '上游报告认证或权限失败。' : '上游返回失败结果。';
-  return new ProbeError(code, message, status, evidence);
+  return new ProbeError(code, message, status, { ...evidence, diagnostic: upstreamDiagnostic(payload, config) });
 }
 
 const numeric = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
@@ -41,12 +42,24 @@ export function normalizeUsage(usage) {
 }
 
 function finalText(response) {
+  if (response?.output !== undefined && !Array.isArray(response.output)) {
+    throw new ProbeError('protocol_error', '最终输出的 output 不是数组，无法识别答案。');
+  }
+  if ((response?.output ?? []).some((item) => !item || typeof item !== 'object'
+    || (item.type === 'message' && item.content !== undefined && !Array.isArray(item.content)))) {
+    throw new ProbeError('protocol_error', '最终输出项或消息内容结构无效，无法识别答案。');
+  }
   const messages = (response?.output ?? []).filter((item) => item.type === 'message' && (!item.role || item.role === 'assistant'));
   // Codex can emit progress messages before its answer. Only its final phase
   // is scored. For legacy unphased messages, the last assistant message wins.
   const selected = messages.filter((item) => item.phase === 'final_answer').at(-1)
     ?? messages.filter((item) => item.phase == null).at(-1);
-  if (selected) return (selected.content ?? []).filter((item) => item.type === 'output_text').map((item) => item.text ?? '').join('\n');
+  if (selected) {
+    if ((selected.content ?? []).some((item) => !item || (item.type === 'output_text' && item.text !== undefined && typeof item.text !== 'string'))) {
+      throw new ProbeError('protocol_error', '最终答案文本结构无效，无法评分。');
+    }
+    return (selected.content ?? []).filter((item) => item.type === 'output_text').map((item) => item.text ?? '').join('\n');
+  }
   if (messages.length) return ''; // Commentary alone is not a final answer.
   return typeof response?.output_text === 'string' ? response.output_text : '';
 }
@@ -59,7 +72,7 @@ function hasRefusal(response) {
   return (response?.output ?? []).some((item) => (item.content ?? []).some((part) => part.type === 'refusal'));
 }
 
-async function limitedText(response, maxBytes) {
+async function limitedText(response, maxBytes, truncate = false) {
   if (!response.body) return '';
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -67,8 +80,11 @@ async function limitedText(response, maxBytes) {
   try {
     while (true) {
       const part = await reader.read(); if (part.done) break;
+      if (bytes + part.value.byteLength > maxBytes) {
+        if (truncate) { return text + decoder.decode(part.value.subarray(0, maxBytes - bytes)); }
+        throw new ProbeError('response_too_large', '响应超过本地大小上限；该题不计为能力失败。');
+      }
       bytes += part.value.byteLength;
-      if (bytes > maxBytes) throw new ProbeError('response_too_large', '响应超过本地大小上限；该题不计为能力失败。');
       text += decoder.decode(part.value, { stream: true });
     }
     return text + decoder.decode();
@@ -76,18 +92,52 @@ async function limitedText(response, maxBytes) {
 }
 
 /** Reads only the Responses final-answer channel. Reasoning summaries are never graded. */
-export async function parseResponse(response, { maxResponseBytes = 8 * 1024 * 1024 } = {}) {
+export async function parseResponse(response, config = {}) {
+  const { maxResponseBytes = 8 * 1024 * 1024 } = config;
   const type = response.headers.get('content-type') || '';
   const started = Date.now();
+  const diagnostic = { responseType: type.includes('event-stream') ? 'sse' : 'json', completed: false,
+    textDeltaChars: 0, finalTextChars: 0, outputSource: null, terminalOutput: [], completedItems: [] };
+  function recordOutput(data, source) {
+    let text;
+    try { text = finalText(data); }
+    catch (error) {
+      diagnostic.emptyReason = 'unrecognized_output';
+      error.evidence = { diagnostic };
+      throw error;
+    }
+    diagnostic.outputSource = source;
+    diagnostic.finalTextChars = text.length;
+    if (!text.trim()) {
+      const messages = (data.output ?? []).filter((item) => item.type === 'message' && (!item.role || item.role === 'assistant'));
+      diagnostic.emptyReason = messages.some((item) => item.phase === 'final_answer' || item.phase == null) ? 'empty_final_answer'
+        : messages.length ? 'no_final_answer' : 'no_output_text';
+    }
+    return text;
+  }
   if (!type.includes('event-stream')) {
     let data;
     try { data = JSON.parse(await limitedText(response, maxResponseBytes)); }
     catch (error) { if (error instanceof ProbeError) throw error; throw new ProbeError('protocol_error', '网关未返回有效的 Responses JSON。'); }
-    const evidence = { model: data.model ?? null, usage: normalizeUsage(data.usage), firstTextMs: null };
-    if (data.error || data.status === 'failed') { throw responseFailure(data, evidence); }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      throw new ProbeError('protocol_error', 'Responses JSON 不是有效的响应对象。', null, { diagnostic });
+    }
+    diagnostic.completed = data.status === 'completed';
+    diagnostic.terminalOutput = outputShape(data.output);
+    const evidence = { model: data.model ?? null, usage: normalizeUsage(data.usage), firstTextMs: null, diagnostic };
+    if (data.error || data.status === 'failed') {
+      const error = responseFailure(data, evidence, config);
+      error.evidence.diagnostic = { ...diagnostic, ...error.evidence.diagnostic };
+      throw error;
+    }
     if (data.status === 'incomplete') { throw new ProbeError('truncated', '上游未完成输出，可能达到输出上限。', null, evidence); }
     if (data.status !== 'completed') { throw new ProbeError('protocol_error', 'Responses JSON 缺少 completed 终止状态。', null, evidence); }
-    return { text: finalText(data), model: data.model ?? null, usage: normalizeUsage(data.usage), toolUsed: hasTool(data), refusal: hasRefusal(data), firstTextMs: null };
+    try {
+      return { text: recordOutput(data, 'completed_response'), ...evidence, toolUsed: hasTool(data), refusal: hasRefusal(data) };
+    } catch (error) {
+      if (error instanceof ProbeError) { error.evidence = evidence; }
+      throw error;
+    }
   }
   if (!response.body) throw new ProbeError('protocol_error', '流式响应没有 body。');
   const reader = response.body.getReader(); const decoder = new TextDecoder();
@@ -107,27 +157,33 @@ export async function parseResponse(response, { maxResponseBytes = 8 * 1024 * 10
     name = event.type || name;
     if (event.response?.model) model = event.response.model;
     if (event.response?.usage) usage = event.response.usage;
-    if (name === 'error' || name === 'response.failed' || event.error) { throw responseFailure(event); }
+    if (name === 'error' || name === 'response.failed' || event.error) { throw responseFailure(event, {}, config); }
     if (name === 'response.incomplete') throw new ProbeError('truncated', '上游输出被截断；该题不计为能力失败。');
     if (/response\.(?:function_call|web_search_call|code_interpreter_call|mcp_call)/.test(name) || /_call$/.test(event.item?.type ?? '') || event.item?.type === 'mcp_approval_request') toolUsed = true;
     if (name === 'response.refusal.delta' || name === 'response.refusal.done') refusal = true;
-    if ((name === 'response.output_item.added' || name === 'response.output_item.done') && event.item) {
+    if (name === 'response.output_item.done' && event.item && (!event.item.status || event.item.status === 'completed')) {
       items.set(event.output_index ?? event.item.id, event.item);
     }
     if (name === 'response.output_text.delta' && typeof event.delta === 'string') {
       if (firstTextMs === null && event.delta) firstTextMs = Date.now() - started;
-      text += event.delta;
+      diagnostic.textDeltaChars += event.delta.length;
     }
     if (name === 'response.completed') {
       if (event.response?.status !== 'completed') throw new ProbeError('protocol_error', 'completed 事件中的状态无效。');
-      if (Array.isArray(event.response.output) || typeof event.response.output_text === 'string') {
-        text = finalText(event.response);
-      } else if (items.size) {
-        text = finalText({ output: [...items.values()] });
+      diagnostic.completed = true;
+      diagnostic.terminalOutput = outputShape(event.response.output);
+      diagnostic.completedItems = outputShape([...items.values()]);
+      // Some gateways finish with output: [] after sending complete output items.
+      // Only output_item.done is eligible; deltas and added items are not answers.
+      const omittedOutput = event.response.output === undefined || (Array.isArray(event.response.output) && event.response.output.length === 0);
+      if (omittedOutput && !event.response.output_text && items.size) {
+        text = recordOutput({ output: [...items.values()] }, 'completed_items');
+      } else if (event.response.output !== undefined || typeof event.response.output_text === 'string') {
+        text = recordOutput(event.response, 'completed_response');
       } else {
         throw new ProbeError('protocol_error', '终态缺少可识别的最终输出项，不能将中途文本当作答案。');
       }
-      toolUsed ||= hasTool(event.response); refusal ||= hasRefusal(event.response);
+      toolUsed ||= hasTool(event.response); refusal ||= hasRefusal(event.response) || hasRefusal({ output: [...items.values()] });
       completed = true;
     }
   }
@@ -148,11 +204,12 @@ export async function parseResponse(response, { maxResponseBytes = 8 * 1024 * 10
     }
     if (!wireEnded && buffer.trim()) processBlock(buffer.replace(/\r\n/g, '\n'));
     if (!completed) throw new ProbeError('incomplete_stream', '流在 response.completed 前结束；不是答错。');
-    return { text, model, usage: normalizeUsage(usage), toolUsed, refusal, firstTextMs };
+    return { text, model, usage: normalizeUsage(usage), toolUsed, refusal, firstTextMs, diagnostic };
   } catch (error) {
     // Keep only observed metadata, never intermediate text or reasoning.
     if (error instanceof Error) {
-      error.evidence = { model, usage: normalizeUsage(usage), firstTextMs };
+      error.evidence = { model, usage: normalizeUsage(usage), firstTextMs,
+        diagnostic: { ...diagnostic, completedItems: outputShape([...items.values()]), ...error.evidence?.diagnostic } };
     }
     throw error;
   } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
@@ -206,12 +263,18 @@ export async function requestProbe(config, probe, { signal, fetchImpl = fetch } 
     const response = await fetchImpl(`${config.baseUrl}/responses`, { method: 'POST', headers: authHeaders(config, session), body: JSON.stringify(body), signal: combined, redirect: 'error' });
     status = response.status;
     headers = { provider: response.headers.get('X-Magpie-Provider'), model: response.headers.get('X-Magpie-Model') };
-    requestId = response.headers.get('x-request-id')?.slice(0, 200) ?? null;
+    requestId = redact(response.headers.get('x-request-id'), config, 200) || null;
     if (!response.ok) {
-      await response.body?.cancel();
-      const classification = failureCode(status);
+      const diagnostic = { responseType: (response.headers.get('content-type') || '').includes('json') ? 'json' : 'other' };
+      try {
+        const raw = await limitedText(response, 16 * 1024, true);
+        diagnostic.bodyTruncated = Buffer.byteLength(raw) >= 16 * 1024;
+        try { Object.assign(diagnostic, upstreamDiagnostic(JSON.parse(raw), config)); }
+        catch { diagnostic.upstreamMessage = redact(raw, config); }
+      } catch { diagnostic.bodyUnavailable = true; }
+      const classification = failureCode(status, { code: diagnostic.upstreamCode, type: diagnostic.upstreamType });
       const code = classification === 'upstream_error' ? 'http_error' : classification;
-      throw new ProbeError(code, `HTTP ${status}：${code === 'auth_error' ? '网关或被测账户认证/权限失败' : code === 'rate_limited' ? '限流、额度不足或账户休息中' : '上游请求失败'}。`, status);
+      throw new ProbeError(code, `HTTP ${status}：${diagnostic.cause === 'account_unavailable' ? '指定账号无法服务所选模型' : code === 'auth_error' ? '网关或被测账户认证/权限失败' : code === 'rate_limited' ? '限流、额度不足或账户休息中' : '上游请求失败'}。`, status, { diagnostic });
     }
     const answer = await parseResponse(response, config);
     const elapsedMs = Date.now() - started;
@@ -230,6 +293,7 @@ export async function requestProbe(config, probe, { signal, fetchImpl = fetch } 
     const evidence = error?.evidence;
     return { status: code, error: code === 'rate_limited' ? '上游报告限流或额度不足。' : code === 'auth_error' ? '上游报告认证或权限失败。' : error instanceof ProbeError ? error.message : code === 'timeout' ? '该题超过时间上限。' : code === 'run_timeout' ? '整轮达到时间上限。' : code === 'cancelled' ? '用户取消。' : '无法完成网关请求，请检查 Magpie 是否运行及地址设置。',
       text: '', model: evidence?.model ?? null, usage: evidence?.usage ?? normalizeUsage(null), firstTextMs: evidence?.firstTextMs ?? null,
+      diagnostic: evidence?.diagnostic ?? null,
       elapsedMs, requestId, httpStatus: status, route: { ...headers, trace: route }, session };
   } finally { clearTimeout(timer); }
 }

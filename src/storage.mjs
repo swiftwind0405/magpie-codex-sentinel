@@ -1,6 +1,7 @@
 import { mkdir, open, readFile, readdir, rename, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { incompleteVerdict } from './assessment.mjs';
 
 export const validRunId = (id) => typeof id === 'string' && /^[a-zA-Z0-9-]{8,100}$/.test(id);
 const MAX_JSON_BYTES = 32 * 1024 * 1024;
@@ -57,6 +58,11 @@ export async function readRun(dataDir, id) {
   if (report.kind === 'evaluation' && (!report.verdict || typeof report.verdict.code !== 'string'
     || typeof report.verdict.label !== 'string' || typeof report.verdict.reason !== 'string')) {
     throw new Error('历史能力判定结构无效。');
+  }
+  // Improve historical failure explanations from saved evidence, without rewriting
+  // source files, recalculating scores, or applying a newer baseline.
+  if (report.kind === 'evaluation' && report.verdict.code === 'incomplete') {
+    report.verdict = incompleteVerdict(report);
   }
   return report;
 }

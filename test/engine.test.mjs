@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, request as httpRequest } from 'node:http';
-import { mkdtemp, rm, readFile, writeFile, stat } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile, stat, mkdir } from 'node:fs/promises';
+import { readdirSync, readFileSync, unlinkSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -12,8 +13,9 @@ import { normalizeOptions } from '../src/config.mjs';
 import { parseResponse, normalizeUsage } from '../src/transport.mjs';
 import { runEvaluation, runFingerprint, getHistory, getRun, setBaseline } from '../src/engine.mjs';
 import { observedIdentity } from '../src/assessment.mjs';
-import { acquireRun, ensureStore, readBaseline, atomicJSON } from '../src/storage.mjs';
-import { renderHtml, formatHistory } from '../src/report.mjs';
+import { acquireRun, ensureStore, readBaseline, readRun, atomicJSON } from '../src/storage.mjs';
+import { renderHtml, formatHistory, formatReport } from '../src/report.mjs';
+import { initializeBaselines } from '../src/baselines.mjs';
 
 const seed = 'integration-fixture-only';
 const model = 'codex/fixture-test';
@@ -62,7 +64,7 @@ async function fixture(t) {
       const account = Buffer.from(request.headers['x-magpie-account'] || '', 'latin1').toString('utf8');
       if (state.hang || state.hangAccount === account) { return; }
       const errorStatus = state.accountErrors.get(account) || state.errorStatus;
-      if (errorStatus) { response.writeHead(errorStatus, { 'content-type': 'application/json' }); response.end('{"error":{"message":"fixture error"}}'); return; }
+      if (errorStatus) { response.writeHead(errorStatus, { 'content-type': state.errorType || 'application/json', 'x-request-id': 'fixture-request-id' }); response.end(state.errorBody || '{"error":{"message":"fixture error"}}'); return; }
       state.sessions.set(request.headers['x-magpie-session'], { model: state.member });
       if (state.json) {
         response.writeHead(200, { 'content-type': 'application/json' });
@@ -87,6 +89,11 @@ async function fixture(t) {
       const output = [message('中途说明不是最终答案。', 'commentary'), message(text)];
       if (state.tools) output.push({ type: 'function_call', name: 'unexpected_tool', arguments: '{}' });
       response.write(`event: response.output_text.delta\ndata: ${JSON.stringify({ type: 'response.output_text.delta', delta: '中途说明不是最终答案。' })}\n\n`);
+      if (state.emptyTerminal) {
+        response.write(`event: response.output_item.done\ndata: ${JSON.stringify({ type: 'response.output_item.done', output_index: 1, item: { ...message(text), status: 'completed' } })}\n\n`);
+        response.end(`event: response.completed\ndata: ${JSON.stringify(complete('', []))}\n\ndata: [DONE]\n\n`);
+        return;
+      }
       response.end(`event: response.completed\ndata: ${JSON.stringify(complete(text, output))}\n\ndata: [DONE]\n\n`);
     } catch (error) { response.writeHead(500).end(); state.error = error; }
   });
@@ -114,6 +121,148 @@ test('damaged, incomplete and tool-bearing responses cannot silently become ordi
   const tool = await parseResponse(sse([complete('{"answer":21}', [message('{"answer":21}'), { type: 'function_call' }])]));
   assert.equal(tool.toolUsed, true);
   assert.equal(normalizeUsage({}).reasoning, null);
+});
+
+test('VPS empty terminal output preserves a completed final answer, never commentary or unfinished text', async () => {
+  // Structural replay of the VPS js-trace-06 response on 2026-10-10.
+  const final = { ...message('{"answer":[8,8,4,7]}'), status: 'completed' };
+  const done = { type: 'response.output_item.done', output_index: 1, item: final };
+  const terminal = complete('', []);
+  const events = [
+    { type: 'response.output_item.added', output_index: 0, item: { type: 'reasoning' } },
+    { type: 'response.output_item.done', output_index: 0, item: { type: 'reasoning' } },
+    { type: 'response.output_item.added', output_index: 1, item: { ...final, status: 'in_progress', content: [] } },
+    { type: 'response.output_text.done', output_index: 1, text: '{"answer":[8,8,4,7]}' },
+    done, terminal,
+  ];
+  const result = await parseResponse(sse(events, 3));
+  assert.equal(result.text, '{"answer":[8,8,4,7]}');
+  assert.equal(result.diagnostic.outputSource, 'completed_items');
+  assert.deepEqual(result.diagnostic.terminalOutput, []);
+  assert.equal(result.diagnostic.completedItems[1].phase, 'final_answer');
+  assert.doesNotMatch(JSON.stringify(result.diagnostic), /"text":|8,8,4,7/);
+
+  const commentary = await parseResponse(sse([{ ...done, item: message('not an answer', 'commentary') }, terminal]));
+  assert.equal(commentary.text, '');
+  assert.equal(commentary.diagnostic.emptyReason, 'no_final_answer');
+  const unfinished = await parseResponse(sse([events[2], { type: 'response.output_text.delta', delta: '{"answer":999}' }, terminal]));
+  assert.equal(unfinished.text, '');
+  assert.equal(unfinished.diagnostic.textDeltaChars, 14);
+  const inconsistent = await parseResponse(sse([{ ...done, item: { ...final, status: 'in_progress' } }, terminal]));
+  assert.equal(inconsistent.text, '', 'An item explicitly marked in progress is not a completed answer');
+  await assert.rejects(parseResponse(sse([done])), { code: 'incomplete_stream' });
+  const explicitEmpty = await parseResponse(sse([done, complete('', [message('')])]));
+  assert.equal(explicitEmpty.text, '', 'An explicit terminal answer remains authoritative');
+  const tools = await parseResponse(sse([done, { type: 'response.output_item.done', output_index: 2, item: { type: 'function_call' } }, terminal]));
+  assert.equal(tools.toolUsed, true);
+  for (const wire of ['json', 'sse']) {
+    const malformed = { status: 'completed', output: [{ type: 'message', role: 'assistant', phase: 'final_answer', content: 'not-an-array' }] };
+    await assert.rejects(parseResponse(wire === 'json' ? new Response(JSON.stringify(malformed)) : sse([{ type: 'response.completed', response: malformed }])),
+      (error) => error.code === 'protocol_error' && error.evidence.diagnostic.emptyReason === 'unrecognized_output');
+  }
+});
+
+test('empty terminal responses are graded and persisted through the real HTTP engine path', async (t) => {
+  const f = await fixture(t); f.state.emptyTerminal = true;
+  const report = await runEvaluation(f.args);
+  assert.equal(report.summary.complete, true);
+  assert.equal(report.summary.passed, 6);
+  assert.equal(report.verdict.code, 'quick_only');
+  assert.ok(report.cases.every((c) => c.diagnostic.outputSource === 'completed_items'));
+  assert.deepEqual(await getRun({ ...f.args, id: report.id }), report);
+});
+
+test('empty answers expose missing scores without claiming a complete batch result', async (t) => {
+  const f = await fixture(t); f.state.text = '';
+  const d = await dashboard(t, f);
+  await d.request('/api/runs', { target: model, profile: 'quick', accountId: d.accounts[0].id });
+  const job = await d.finished();
+  assert.equal(job.accounts[0].status, 'incomplete');
+  const report = await getRun({ ...f.args, id: job.reportId });
+  assert.equal(report.runStatus, 'completed');
+  assert.equal(report.summary.complete, false);
+  assert.match(report.verdict.label, /6 题未取得最终答案/);
+  assert.match(report.verdict.reason, /已执行 6\/6 题，可评分 0 题/);
+  assert.ok(report.cases.every((c) => c.diagnostic.emptyReason === 'empty_final_answer'));
+});
+
+test('HTTP diagnostics redact secrets, preserve the reason, and stop an unavailable account after one request', async (t) => {
+  const f = await fixture(t);
+  f.state.accountErrors.set(f.state.accounts[0].user, 404);
+  f.state.errorBody = JSON.stringify({ error: { type: 'not_found_error', code: null,
+    message: `X-Magpie-Account: no account "${f.options.account}" serves this model; its accounts are second@example.test, private-team` },
+    token: 'do-not-copy-whole-payload' });
+  const d = await dashboard(t, f);
+  await d.request('/api/runs', { target: model, profile: 'quick', accountIds: d.accounts.map((a) => a.id) });
+  const job = await d.finished();
+  assert.deepEqual(job.accounts.map((a) => a.status), ['incomplete', 'completed']);
+  assert.equal(f.state.calls.length, 7);
+  const report = await getRun({ ...f.args, id: job.accounts[0].reportId });
+  assert.equal(report.cases.length, 1);
+  assert.equal(report.stop.scope, 'account');
+  assert.equal(report.cases[0].diagnostic.cause, 'account_unavailable');
+  assert.equal(report.cases[0].requestId, 'fixture-request-id');
+  assert.match(report.verdict.label, /指定账号无法服务所选模型/);
+  assert.match(report.verdict.reason, /5 题未执行/);
+  for (const text of [JSON.stringify(report), formatReport(report), renderHtml(report)]) {
+    assert.doesNotMatch(text, /private@example|second@example|private-team|do-not-copy/);
+    assert.match(text, /not_found_error/);
+  }
+});
+
+test('explicit shared configuration failures stop a batch; ambiguous 404s only stop the current account', async (t) => {
+  const f = await fixture(t);
+  const d = await dashboard(t, f);
+  for (const code of ['model_not_found', 'endpoint_not_found', null]) {
+    f.state.calls = [];
+    f.state.errorStatus = 404;
+    f.state.errorBody = JSON.stringify({ error: { code, message: 'fixture error' } });
+    await d.request('/api/runs', { target: model, profile: 'quick', accountIds: d.accounts.map((a) => a.id) });
+    const job = await d.finished();
+    assert.deepEqual(job.accounts.map((a) => a.status), code ? ['incomplete', 'skipped'] : ['incomplete', 'incomplete']);
+    assert.equal(f.state.calls.length, code ? 1 : 2);
+    const report = await getRun({ ...f.args, id: job.accounts[0].reportId });
+    assert.equal(report.stop.scope, code ? 'batch' : 'account');
+  }
+});
+
+test('diagnostic bodies are bounded and redacted across HTTP and SSE failures', async (t) => {
+  const f = await fixture(t);
+  const privateMessage = `key=${f.args.apiKey} email=${f.options.account} token="unknown-upstream-secret" Bearer another-secret https://private.test/?password=hidden`;
+  for (const sseFailure of [false, true]) {
+    f.state.errorStatus = sseFailure ? null : 404;
+    f.state.errorBody = JSON.stringify({ error: { message: privateMessage, code: 'model_not_found' } });
+    f.state.events = sseFailure ? [{ type: 'response.failed', response: { status: 'failed', error: { message: privateMessage, code: 'model_not_found' } } }] : null;
+    const report = await runEvaluation(f.args);
+    assert.equal(report.stop.scope, 'batch');
+    assert.equal(report.cases.length, 1);
+    assert.doesNotMatch(JSON.stringify(report), /fixture-secret-never-persist|private@example|unknown-upstream-secret|another-secret|private.test/);
+    assert.match(report.cases[0].diagnostic.upstreamMessage, /已隐藏/);
+  }
+  f.state.events = null; f.state.errorStatus = 404;
+  f.state.errorType = 'text/plain';
+  f.state.errorBody = `${privateMessage} ${'x'.repeat(20000)}`;
+  const bounded = await runEvaluation(f.args);
+  assert.equal(bounded.cases[0].httpStatus, 404);
+  assert.equal(bounded.cases[0].diagnostic.bodyTruncated, true);
+  assert.ok(bounded.cases[0].diagnostic.upstreamMessage.length <= 800);
+  assert.doesNotMatch(JSON.stringify(bounded), /fixture-secret-never-persist|private@example|unknown-upstream-secret|another-secret/);
+});
+
+test('old incomplete reports gain specific explanations on read without rewriting history', async (t) => {
+  const f = await fixture(t); f.state.text = '';
+  const report = await runEvaluation(f.args);
+  report.verdict = { code: 'incomplete', label: '运行不完整，无法判断能力变化', reason: '旧版通用说明' };
+  for (const row of report.cases) { delete row.diagnostic; }
+  const path = join(f.directory, 'codex-sentinel', 'runs', `${report.id}.json`);
+  const original = JSON.stringify(report);
+  await writeFile(path, original);
+  const displayed = await getRun({ ...f.args, id: report.id });
+  assert.match(displayed.verdict.label, /6 题未取得最终答案/);
+  assert.equal(displayed.summary.usable, 0);
+  assert.match(renderHtml(displayed), /此历史记录未保存响应诊断/);
+  assert.match(formatReport(displayed), /无法从旧报告恢复/);
+  assert.equal(await readFile(path, 'utf8'), original);
 });
 
 test('an unfinished trace with good headers is not a verified comparison identity', () => {
@@ -158,6 +307,158 @@ test('frozen same-configuration baselines require repeats and reject route chang
   assert.equal(afterDamage.summary.complete, true); assert.equal(afterDamage.verdict.code, 'baseline_unavailable');
   assert.equal(afterDamage.persisted, true); assert.equal((await getHistory(f.args))[0].id, afterDamage.id);
   assert.deepEqual(JSON.parse(await readFile(path, 'utf8')), invalid);
+});
+
+test('three completed standards automatically freeze a reference, then subsequent runs compare without replacing it', async (t) => {
+  const f = await fixture(t);
+  const dataDir = join(f.directory, 'codex-sentinel');
+  const one = await runEvaluation({ ...f.args, profile: 'standard' });
+  assert.equal(await readBaseline(dataDir, one.comparisonKey), null);
+  assert.match(one.verdict.reason, /已收集 1\/3/);
+  const two = await runEvaluation({ ...f.args, profile: 'standard' });
+  assert.equal(await readBaseline(dataDir, one.comparisonKey), null);
+  assert.match(two.verdict.reason, /已收集 2\/3/);
+  const before = await readFile(join(dataDir, 'runs', `${one.id}.json`), 'utf8');
+  // Completeness does not require a perfect score.
+  f.state.wrong = true;
+  const three = await runEvaluation({ ...f.args, profile: 'standard' });
+  assert.equal(three.summary.rate, 0);
+  const baseline = await readBaseline(dataDir, one.comparisonKey);
+  assert.deepEqual(baseline.runIds, [one.id, two.id, three.id]);
+  assert.equal(baseline.source, 'automatic');
+  assert.equal(baseline.mean, 2 / 3);
+  assert.equal(three.verdict.code, 'baseline_established');
+  assert.equal(three.verdict.drop, undefined, 'Do not compare a reference sample against itself');
+  assert.equal((await getRun({ ...f.args, id: one.id })).verdict.code, 'baseline_established');
+  assert.equal(await readFile(join(dataDir, 'runs', `${one.id}.json`), 'utf8'), before);
+  const baselinePath = join(dataDir, 'baselines', `${one.comparisonKey}.json`);
+  const frozen = await readFile(baselinePath, 'utf8');
+  const fourth = await runEvaluation({ ...f.args, profile: 'standard' });
+  assert.equal(fourth.verdict.code, 'decline_signal');
+  const fifth = await runEvaluation({ ...f.args, profile: 'standard' });
+  assert.equal(fifth.verdict.code, 'repeated_decline');
+  assert.equal(await readFile(baselinePath, 'utf8'), frozen);
+  await initializeBaselines(dataDir);
+  assert.equal(await readFile(baselinePath, 'utf8'), frozen);
+});
+
+test('automatic collection excludes incomplete and quick runs and separates actual routes', async (t) => {
+  const f = await fixture(t);
+  const dataDir = join(f.directory, 'codex-sentinel');
+  const first = await runEvaluation({ ...f.args, profile: 'standard' });
+  await runEvaluation(f.args);
+  f.state.errorStatus = 429;
+  await runEvaluation({ ...f.args, profile: 'standard' });
+  f.state.errorStatus = null;
+  f.state.member = 'fixture/other-route';
+  await runEvaluation({ ...f.args, profile: 'standard' });
+  const other = await runEvaluation({ ...f.args, profile: 'standard' });
+  assert.match(other.verdict.reason, /已收集 2\/3/);
+  assert.equal(await readBaseline(dataDir, first.comparisonKey), null);
+  f.state.member = model;
+  const second = await runEvaluation({ ...f.args, profile: 'standard' });
+  assert.match(second.verdict.reason, /已收集 2\/3/);
+  const third = await runEvaluation({ ...f.args, profile: 'standard' });
+  assert.deepEqual((await readBaseline(dataDir, first.comparisonKey)).runIds, [first.id, second.id, third.id]);
+});
+
+test('automatic references do not mix accounts or different request configurations', async (t) => {
+  const f = await fixture(t);
+  const dataDir = join(f.directory, 'codex-sentinel');
+  const first = await runEvaluation({ ...f.args, profile: 'standard' });
+  const otherArgs = { ...f.args, options: { ...f.options, account: 'second@example.test' }, profile: 'standard' };
+  const other = await runEvaluation(otherArgs);
+  await runEvaluation(otherArgs);
+  const different = await runEvaluation({ ...f.args, options: { ...f.options, effort: 'medium' }, profile: 'standard' });
+  assert.equal(await readBaseline(dataDir, first.comparisonKey), null);
+  assert.equal(await readBaseline(dataDir, other.comparisonKey), null);
+  assert.equal(await readBaseline(dataDir, different.comparisonKey), null);
+  const otherThird = await runEvaluation(otherArgs);
+  assert.equal(otherThird.verdict.code, 'baseline_established');
+  assert.equal(await readBaseline(dataDir, first.comparisonKey), null);
+  assert.equal(await readBaseline(dataDir, different.comparisonKey), null);
+  assert.equal((await readBaseline(dataDir, other.comparisonKey)).runIds.length, 3);
+});
+
+test('startup backfills existing records once without rewriting sources and respects the data lock', async (t) => {
+  const f = await fixture(t);
+  const dataDir = join(f.directory, 'codex-sentinel');
+  const runs = [];
+  for (let i = 0; i < 3; i++) { runs.push(await runEvaluation({ ...f.args, profile: 'standard' })); }
+  const path = join(dataDir, 'baselines', `${runs[0].comparisonKey}.json`);
+  await rm(path); // Reproduce an existing pre-automatic data directory.
+  const sourceBytes = await Promise.all(runs.map((run) => readFile(join(dataDir, 'runs', `${run.id}.json`), 'utf8')));
+  const release = await acquireRun(dataDir);
+  await assert.rejects(initializeBaselines(dataDir), /已有一轮检测/);
+  assert.equal(await readBaseline(dataDir, runs[0].comparisonKey), null);
+  await release();
+  const d = await dashboard(t, f);
+  assert.equal((await (await d.request('/api/state')).json()).baselineWarning, '');
+  const baseline = await readBaseline(dataDir, runs[0].comparisonKey);
+  assert.deepEqual(baseline.runIds, runs.map((r) => r.id));
+  assert.equal((await (await d.request(`/api/runs/${runs[0].id}`)).json()).verdict.code, 'baseline_established');
+  assert.deepEqual(await Promise.all(runs.map((run) => readFile(join(dataDir, 'runs', `${run.id}.json`), 'utf8'))), sourceBytes);
+  const bytes = await readFile(path, 'utf8');
+  const again = await initializeBaselines(dataDir);
+  assert.equal(again.created.length, 0);
+  assert.equal(await readFile(path, 'utf8'), bytes);
+});
+
+test('baseline creation failure preserves saved scores and never claims reference success', async (t) => {
+  const f = await fixture(t);
+  const dataDir = join(f.directory, 'codex-sentinel');
+  const one = await runEvaluation({ ...f.args, profile: 'standard' });
+  await runEvaluation({ ...f.args, profile: 'standard' });
+  const path = join(dataDir, 'baselines', `${one.comparisonKey}.json`);
+  await mkdir(path);
+  const third = await runEvaluation({ ...f.args, profile: 'standard' });
+  assert.equal(third.persisted, true);
+  assert.equal(third.summary.passed, 18);
+  assert.equal(third.verdict.code, 'baseline_unavailable');
+  assert.equal((await stat(path)).isDirectory(), true);
+  assert.equal((await readRun(dataDir, third.id)).summary.passed, 18);
+  await rm(path, { recursive: true });
+  await initializeBaselines(dataDir);
+  assert.equal((await readBaseline(dataDir, one.comparisonKey)).runIds.length, 3);
+});
+
+test('a third run whose final report cannot be saved never creates an automatic reference', async (t) => {
+  const f = await fixture(t);
+  const dataDir = join(f.directory, 'codex-sentinel');
+  const one = await runEvaluation({ ...f.args, profile: 'standard' });
+  await runEvaluation({ ...f.args, profile: 'standard' });
+  const report = await runEvaluation({ ...f.args, profile: 'standard', onProgress({ message }) {
+    if (!message.startsWith('18/')) { return; }
+    for (const file of readdirSync(join(dataDir, 'runs'))) {
+      const path = join(dataDir, 'runs', file);
+      if (JSON.parse(readFileSync(path, 'utf8')).runStatus === 'running') {
+        // A directory at the destination makes the real final atomic rename fail.
+        unlinkSync(path);
+        mkdirSync(path);
+      }
+    }
+  } });
+  assert.equal(report.summary.complete, true);
+  assert.equal(report.persisted, false);
+  assert.equal(await readBaseline(dataDir, one.comparisonKey), null);
+});
+
+test('CLI baseline without IDs backfills historical records without calling the gateway', async (t) => {
+  const f = await fixture(t);
+  const runs = [];
+  for (let i = 0; i < 3; i++) { runs.push(await runEvaluation({ ...f.args, profile: 'standard' })); }
+  const dataDir = join(f.directory, 'codex-sentinel');
+  await rm(join(dataDir, 'baselines', `${runs[0].comparisonKey}.json`));
+  const calls = f.state.calls.length;
+  const child = spawn(process.execPath, [fileURLToPath(new URL('../bin/sentinel.mjs', import.meta.url)), 'baseline', '--data-dir', dataDir, '--json']);
+  let output = ''; let errors = '';
+  child.stdout.on('data', (chunk) => { output += chunk; });
+  child.stderr.on('data', (chunk) => { errors += chunk; });
+  const code = await new Promise((resolve, reject) => { child.on('error', reject); child.on('close', resolve); });
+  assert.equal(code, 0, errors);
+  assert.equal(JSON.parse(output).created.length, 1);
+  assert.deepEqual((await readBaseline(dataDir, runs[0].comparisonKey)).runIds, runs.map((r) => r.id));
+  assert.equal(f.state.calls.length, calls);
 });
 
 test('rate limits stop the run and have no capability denominator', async (t) => {
@@ -354,6 +655,11 @@ test('dashboard uses the real HTTP engine, exposes saved reports and blocks cros
   const script = await d.request('/app.js');
   assert.equal(script.status, 200);
   assert.match(script.headers.get('content-type'), /javascript/);
+  assert.match(html, /<script src="\/app\.js" type="module"><\/script>/);
+  const cardModule = await d.request('/account-result.js');
+  assert.equal(cardModule.status, 200);
+  assert.match(cardModule.headers.get('content-type'), /javascript/);
+  assert.equal(await cardModule.text(), await readFile(new URL('../web/account-result.js', import.meta.url), 'utf8'));
   for (const [, id] of (await script.text()).matchAll(/\$\('([^']+)'\)/g)) { assert.ok(ids.includes(id), `Missing control: ${id}`); }
   const stylesheet = await d.request('/style.css');
   assert.equal(stylesheet.status, 200);
@@ -427,20 +733,26 @@ test('dashboard refresh cannot duplicate jobs; stopping a job persists cancellat
   assert.equal((await getRun({ ...f.args, id: next.reportId })).runStatus, 'completed');
 });
 
-test('dashboard baseline selection writes a reusable reference and preserves all source runs', async (t) => {
+test('dashboard automatically collects three standards and exposes collection progress without selection controls', async (t) => {
   const f = await fixture(t);
   const d = await dashboard(t, f);
   const runs = [];
+  const sourceBytes = [];
+  const html = await (await d.request('/')).text();
+  assert.doesNotMatch(html, /id="baseline"|data-select|设为基线/);
   for (let i = 0; i < 3; i++) {
     assert.equal((await d.request('/api/runs', { target: model, profile: 'standard', accountId: d.accounts[0].id })).status, 202);
     const job = await d.finished();
     runs.push(await getRun({ ...f.args, id: job.reportId }));
+    sourceBytes.push(await readFile(join(f.directory, 'codex-sentinel', 'runs', `${job.reportId}.json`), 'utf8'));
+    assert.equal(runs.at(-1).verdict.code, i < 2 ? 'no_baseline' : 'baseline_established');
   }
   const ids = runs.map((run) => run.id);
-  const response = await d.request('/api/baseline', { runIds: ids });
-  assert.equal(response.status, 200);
   assert.deepEqual((await readBaseline(join(f.directory, 'codex-sentinel'), runs[0].comparisonKey)).runIds, ids);
-  for (const run of runs) { assert.deepEqual(await getRun({ ...f.args, id: run.id }), run); }
+  for (const [index, run] of runs.entries()) {
+    assert.equal(await readFile(join(f.directory, 'codex-sentinel', 'runs', `${run.id}.json`), 'utf8'), sourceBytes[index]);
+    assert.equal((await getRun({ ...f.args, id: run.id })).verdict.code, 'baseline_established');
+  }
 });
 
 test('all-account dashboard run completes one standard check per account with separate saved reports', async (t) => {

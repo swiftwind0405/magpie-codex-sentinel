@@ -1,6 +1,6 @@
 {
   "name": "magpie-codex-sentinel",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Magpie plugin for per-account Codex capability checks in a local dashboard",
   "type": "module",
   "main": "./index.mjs",

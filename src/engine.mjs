@@ -5,6 +5,8 @@ import { buildFingerprintProbes, analyzeFingerprint } from './fingerprint.mjs';
 import { requestProbe } from './transport.mjs';
 import { acquireRun, listRuns, readRun, saveRun, readBaseline, saveBaseline } from './storage.mjs';
 import { summarize, observedIdentity, makeBaseline, assessRun } from './assessment.mjs';
+import { stopForFailure } from './diagnostics.mjs';
+import { collectBaselines, explainBaselineCollection } from './baselines.mjs';
 export { formatReport, formatHistory } from './report.mjs';
 
 function runId() { return `${new Date().toISOString().replace(/[-:.]/g, '')}-${randomUUID().slice(0, 8)}`; }
@@ -36,6 +38,10 @@ async function run({ options = {}, apiKey, directory, profile = 'quick', signal,
     await saveRun(config.dataDir, report);
   }
   try {
+    if (kind === 'evaluation' && profile === 'standard') {
+      try { await collectBaselines(config.dataDir, await listRuns(config.dataDir)); }
+      catch { report.warnings.push('历史参考收集暂不可用，将保留本轮检测成绩。'); }
+    }
     await checkpoint();
     progress(`目标 ${config.target}；将串行发送 ${probes.length} 个独立测试请求，每题超时 ${config.timeoutMs / 1000} 秒。输出 token 上限是否生效由通道决定。`);
     for (const probe of probes) {
@@ -47,6 +53,8 @@ async function run({ options = {}, apiKey, directory, profile = 'quick', signal,
         row.status = row.grade.passed ? 'pass' : row.grade.formatValid ? 'wrong_answer' : 'invalid_format';
       }
       report.cases.push(row);
+      const stop = stopForFailure(row);
+      if (stop) { report.stop = { ...stop, caseId: row.id }; }
       try { await checkpoint(); }
       catch {
         report.persisted = false;
@@ -55,8 +63,8 @@ async function run({ options = {}, apiKey, directory, profile = 'quick', signal,
       }
       const state = { pass: '通过', wrong_answer: '答案不符', invalid_format: '格式不符', completed: '采样完成' }[row.status] || row.status;
       progress(`${report.cases.length}/${probes.length} ${probe.id}：${state}`);
-      if (['auth_error', 'rate_limited', 'cancelled', 'run_timeout'].includes(row.status)) {
-        report.warnings.push('遇到认证、限流或取消状态后停止，避免继续消耗请求。'); break;
+      if (stop) {
+        report.warnings.push(stop.reason); break;
       }
     }
     report.completedAt = new Date().toISOString();
@@ -84,7 +92,7 @@ async function run({ options = {}, apiKey, directory, profile = 'quick', signal,
         priorRuns = [];
         report.warnings.push('部分历史无法读取，本轮不会作“连续两轮下降”的确认。');
       }
-      report.verdict = historyUnavailable ? { code: 'baseline_unavailable', label: '基线无法读取，仅报告本轮得分', reason: '原基线没有被覆盖；请检查历史文件或重新选定完整记录。' } : assessRun(report, baseline, priorRuns);
+      report.verdict = historyUnavailable ? { code: 'baseline_unavailable', label: '基线无法读取，仅报告本轮得分', reason: '原基线没有被覆盖；请检查历史文件和数据目录权限。' } : assessRun(report, baseline, priorRuns);
       report.baseline = baseline ? { createdAt: baseline.createdAt, runIds: baseline.runIds, mean: baseline.mean, observedKey: baseline.observedKey } : null;
     } else {
       const accepted = report.cases.filter((c) => c.status === 'completed').map((c) => ({ text: c.text, expectedCount: c.expectedCount }));
@@ -95,6 +103,20 @@ async function run({ options = {}, apiKey, directory, profile = 'quick', signal,
     report.warnings.push(config.account ? '本次使用 X-Magpie-Account 严格固定账号；Magpie 的契约是不可用时失败，不切换账号。归属依赖网关执行此契约，不是对上游登录身份的独立认证。' : '未固定账户：结果代表该 Magpie 路由。多账户切换可能影响比较。');
     try { report.persisted = true; await saveRun(config.dataDir, report); }
     catch { report.persisted = false; report.warnings.push('最终结果无法保存，请保留当前输出；没有声称磁盘记录已更新。'); }
+    if (kind === 'evaluation' && report.persisted && profile === 'standard') {
+      try {
+        const saved = await listRuns(config.dataDir);
+        const result = await collectBaselines(config.dataDir, saved);
+        if (result.errors.includes(report.comparisonKey)) {
+          report.warnings.push('自动保存历史参考失败，请检查数据目录权限或已有参考文件；检测成绩已保存。');
+          report.verdict = { code: 'baseline_unavailable', label: '历史参考保存失败，仅报告本轮得分', reason: report.warnings.at(-1) };
+        } else {
+          Object.assign(report, await explainBaselineCollection(config.dataDir, report, saved));
+        }
+      } catch {
+        report.warnings.push('自动收集历史参考失败，已保存的检测记录未改写；请检查数据目录。');
+      }
+    }
     return report;
   } finally { clearTimeout(timer); await release(); }
 }
@@ -104,13 +126,16 @@ export function runFingerprint(args = {}) { return run(args, 'fingerprint'); }
 
 export async function getHistory({ options = {}, apiKey, directory, limit = 20 } = {}) {
   const config = normalizeOptions(options, { apiKey, directory, requireTarget: false });
-  return (await listRuns(config.dataDir)).filter((r) => r.kind === 'unreadable' || ((!config.target || r.config?.target === config.target)
+  const runs = await listRuns(config.dataDir);
+  const visible = runs.filter((r) => r.kind === 'unreadable' || ((!config.target || r.config?.target === config.target)
     && (!config.account || r.config?.accountId === publicConfig(config).accountId))).slice(0, limit);
+  return Promise.all(visible.map((run) => explainBaselineCollection(config.dataDir, run, runs)));
 }
 
 export async function getRun({ options = {}, apiKey, directory, id } = {}) {
   const config = normalizeOptions(options, { apiKey, directory, requireTarget: false });
-  return readRun(config.dataDir, id);
+  const report = await readRun(config.dataDir, id);
+  return explainBaselineCollection(config.dataDir, report, report.verdict?.code === 'no_baseline' ? await listRuns(config.dataDir) : []);
 }
 
 export async function setBaseline({ options = {}, apiKey, directory, runIds, signal } = {}) {
@@ -121,6 +146,10 @@ export async function setBaseline({ options = {}, apiKey, directory, runIds, sig
   for (const id of runIds) { signal?.throwIfAborted(); runs.push(await readRun(config.dataDir, id)); }
   const baseline = makeBaseline(runs);
   signal?.throwIfAborted();
-  await saveBaseline(config.dataDir, baseline);
-  return { ...baseline, message: `已将 ${runs.length} 轮标准检测设为固定参考，平均通过率 ${(baseline.mean * 100).toFixed(1)}%。后续相同配置使用此参考，不自动覆盖。` };
+  const release = await acquireRun(config.dataDir);
+  try {
+    signal?.throwIfAborted();
+    await saveBaseline(config.dataDir, baseline);
+    return { ...baseline, message: `已将 ${runs.length} 轮标准检测设为固定参考，平均通过率 ${(baseline.mean * 100).toFixed(1)}%。后续相同配置使用此参考，不自动覆盖。` };
+  } finally { await release(); }
 }

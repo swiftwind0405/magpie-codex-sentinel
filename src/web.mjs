@@ -7,10 +7,12 @@ import { fetchModels, fetchAccounts } from './transport.mjs';
 import { runEvaluation, runFingerprint, getHistory, getRun, setBaseline, formatReport } from './engine.mjs';
 import { renderHtml } from './report.mjs';
 import { createAccess } from './access.mjs';
+import { initializeBaselines } from './baselines.mjs';
 
 const assets = new Map([
   ['/', ['index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
+  ['/account-result.js', ['account-result.js', 'text/javascript; charset=utf-8']],
   ['/style.css', ['style.css', 'text/css; charset=utf-8']],
   ['/login', ['login.html', 'text/html; charset=utf-8']],
   ['/login.js', ['login.js', 'text/javascript; charset=utf-8']],
@@ -49,6 +51,13 @@ export async function startDashboard({ options = {}, directory, apiKey, port = 4
   access ??= await createAccess(options);
   const config = normalizeOptions(options, { directory, apiKey, requireTarget: false });
   const common = { options, directory, apiKey: config.apiKey };
+  let baselineWarning = '';
+  try {
+    const result = await initializeBaselines(config.dataDir);
+    if (result.errors.length) { baselineWarning = '部分历史参考无法自动建立，请检查原参考文件和数据目录权限。'; }
+  } catch {
+    baselineWarning = '启动时未能收集历史参考，可能有另一轮检测正在运行；后续标准检测结束后会重试。';
+  }
   const serviceId = hash(`${config.dataDir}\n${config.baseUrl}`);
   const cleanError = (error) => {
     const message = String(error?.message || '操作失败。');
@@ -79,9 +88,15 @@ export async function startDashboard({ options = {}, directory, apiKey, port = 4
         const report = await run({ ...common, options: { ...runOptions, account: item.accountName }, profile: current.profile, signal,
           onProgress: ({ message }) => { current.messages.push(message); } });
         current.report = report;
-        Object.assign(item, { status: report.runStatus, reportId: report.id, summary: report.summary, verdict: report.verdict, fingerprint: report.fingerprint, persisted: report.persisted });
+        const complete = report.kind === 'evaluation' ? report.summary.complete : report.summary.completed === report.summary.planned;
+        Object.assign(item, { status: report.runStatus === 'completed' && !complete ? 'incomplete' : report.runStatus,
+          reportId: report.id, summary: report.summary, verdict: report.verdict, fingerprint: report.fingerprint, persisted: report.persisted });
         if (!report.persisted) {
           current.error = '结果保存失败，已停止后续账号。请先导出未保存的报告。';
+          break;
+        }
+        if (report.stop?.scope === 'batch') {
+          current.error = report.stop.reason;
           break;
         }
       } catch (error) {
@@ -163,7 +178,7 @@ export async function startDashboard({ options = {}, directory, apiKey, port = 4
       return;
     }
     if (request.method === 'GET' && path === '/api/state') {
-      send(response, 200, { product: 'codex-sentinel', version: VERSION, serviceId, mode, remote: access.remote, gateway: config.baseUrl, defaults: { target: config.target, effort: config.effort, seed: config.seed, accountId: accountId(config.baseUrl, config.account) }, job: snapshot() });
+      send(response, 200, { product: 'codex-sentinel', version: VERSION, serviceId, mode, remote: access.remote, baselineWarning, gateway: config.baseUrl, defaults: { target: config.target, effort: config.effort, seed: config.seed, accountId: accountId(config.baseUrl, config.account) }, job: snapshot() });
       return;
     }
     if (request.method === 'GET' && path === '/api/models') {

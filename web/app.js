@@ -1,7 +1,9 @@
+import { accountResult, latestAccountRun } from './account-result.js';
+
 const $ = (id) => document.getElementById(id);
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const labels = { quick: '快速初筛', standard: '标准检测', fingerprint: '行为指纹' };
-const statuses = { pass: '通过', wrong_answer: '答案不符', invalid_format: '格式不符', completed: '采样完成', rate_limited: '限流 / 额度不足', auth_error: '认证失败', timeout: '单题超时', run_timeout: '整轮超时', cancelled: '已取消', upstream_error: '上游失败', network_error: '网络错误', truncated: '输出截断', refusal: '拒答', tool_contaminated: '出现工具调用', empty_output: '空输出', protocol_error: '协议异常', incomplete_stream: '流未完成', response_too_large: '响应超限' };
+const statuses = { pass: '通过', wrong_answer: '答案不符', invalid_format: '格式不符', completed: '采样完成', rate_limited: '限流 / 额度不足', auth_error: '认证失败', timeout: '单题超时', run_timeout: '整轮超时', cancelled: '已取消', upstream_error: '上游失败', http_error: 'HTTP 请求失败', network_error: '网络错误', truncated: '输出截断', refusal: '拒答', tool_contaminated: '出现工具调用', empty_output: '未取得最终答案', protocol_error: '协议异常', incomplete_stream: '流未完成', response_too_large: '响应超限' };
 const familyNames = { candy: '组合保证', 'js-trace': '代码跟踪', constraint: '约束逻辑' };
 let models = [];
 let accounts = [];
@@ -16,7 +18,6 @@ let connectionLost = false;
 let defaults = {};
 let viewedRun = null;
 let seenResults = '';
-const selected = new Set();
 const isActive = () => job && ['running', 'cancelling'].includes(job.status);
 const profile = () => document.querySelector('input[name="profile"]:checked').value;
 
@@ -89,11 +90,9 @@ function controls() {
   if (job?.scope === 'all') {
     $('run-state').textContent = job.status === 'cancelling' ? '批次正在停止' : isActive() ? '批次检测中' : job.cancelled ? '批次已停止' : job.status === 'failed' ? '批次异常结束' : '批次已结束';
   }
-  $('baseline').disabled = busy || selected.size < 3;
-  $('selected-count').textContent = selected.size;
   $('run-hint').textContent = profile() === 'fingerprint' ? '发送 3 次采样请求，候选相似度不能证明模型身份。' : `点击后最多发送 ${profile() === 'quick' ? 6 : 18} 次独立请求，使用所选通道的额度。`;
   const perAccount = profile() === 'fingerprint' ? 3 : profile() === 'quick' ? 6 : 18;
-  $('batch-hint').textContent = `${labels[profile()]}：${accounts.length} 个账号 × ${perAccount} 次，最多 ${accounts.length * perAccount} 次测试请求。逐个检测，单个账号失败后继续；结果分别保存。`;
+  $('batch-hint').textContent = `${labels[profile()]}：${accounts.length} 个账号 × ${perAccount} 次，最多 ${accounts.length * perAccount} 次测试请求。账号不可用时继续下一个；明确的公共模型或接口错误会停止批次。`;
 }
 
 function efforts(preferred = $('effort').value) {
@@ -114,7 +113,7 @@ function accountName(id, fallback = '未固定账号') {
 }
 
 function scoreText(run) {
-  if (run.summary.usable > 0) { return `${run.summary.passed}/${run.summary.usable}`; }
+  if (run.summary.usable > 0) { return `${run.summary.passed}/${run.summary.usable} 可评分题通过 · 计划 ${run.summary.planned} 题`; }
   const errors = Object.keys(run.summary.errors || {}).map((code) => statuses[code] || code);
   return errors.length ? `未评分 · ${errors.join('、')}` : '暂无可评分结果';
 }
@@ -127,19 +126,17 @@ function accountCards() {
     return;
   }
   $('account-count').textContent = `${accounts.length} 个`;
+  $('account-scope').textContent = `${$('model').value || '当前模型'} · ${$('effort').value} · 当前配置下最近一次能力检测，得分与历史变化分别展示。`;
   $('account-cards').innerHTML = accounts.length ? accounts.map((account) => {
-    const relevant = runs.filter((run) => run.config?.accountId === account.id && run.kind === 'evaluation'
-      && run.config.target === $('model').value && run.config.effort === $('effort').value && run.config.seed === $('seed').value);
-    const latest = relevant.find((run) => run.profile === 'standard') || relevant[0];
+    const latest = latestAccountRun(runs, { accountId: account.id, target: $('model').value, effort: $('effort').value, seed: $('seed').value });
+    const result = accountResult(latest);
     const quota = account.windows.map((window) => {
       const known = window.remaining != null;
       const label = known ? `剩余 ${window.remaining}%` : '额度未知';
       return `<div class="quota ${known && window.remaining <= 10 ? 'low' : ''}"><div class="quota-labels"><span>${esc(window.name)}</span><strong>${esc(label)}</strong></div>${known ? `<meter min="0" max="100" value="${esc(window.remaining)}" aria-label="${esc(`${window.name}：${label}`)}">${esc(label)}</meter>` : '<div class="quota-unknown" aria-hidden="true"></div>'}${window.remaining === 0 && window.resetsAt ? `<p class="quota-reset">${esc(date(window.resetsAt))} 重置</p>` : ''}</div>`;
     }).join('');
     const unavailable = account.windows.some((window) => window.remaining === 0);
-    const decline = ['decline_signal', 'repeated_decline'].includes(latest?.verdict?.code);
-    const result = latest ? `${labels[latest.profile]} ${date(latest.startedAt)} · ${scoreText(latest)} · ${latest.verdict.label}` : '尚无当前配置的账号检测';
-    return `<article class="account-card ${decline ? 'decline' : ''}" aria-label="${esc(account.name)}"><div class="account-head"><span class="account-avatar" aria-hidden="true">C</span><strong>${esc(account.name)}</strong><span class="badge">${esc(account.plan || 'Codex')}</span></div>${quota ? `<div class="quota-windows">${quota}</div>` : ''}<p class="account-result ${latest ? '' : 'no-result'}">${esc(result)}</p>${unavailable || account.error || !quota ? `<p class="hint">${unavailable ? '额度不足，暂不能检测。' : ''}${esc(account.error || (!quota ? '额度暂未知' : ''))}</p>` : ''}<small>额度读取：${esc(date(account.readAt))}</small><div class="account-actions"><button type="button" class="text-button" data-account="${esc(account.id)}">选择此账号</button>${latest ? `<button type="button" class="text-button" data-view="${esc(latest.id)}">查看报告</button>` : ''}</div></article>`;
+    return `<article class="account-card" aria-label="${esc(account.name)}"><div class="account-head"><span class="account-avatar" aria-hidden="true">C</span><strong>${esc(account.name)}</strong><span class="badge">${esc(account.plan || 'Codex')}</span></div><div class="account-result ${esc(result.tone)}"><h3>${esc(result.title)}</h3><p class="account-score"><strong>${esc(result.score)}</strong><span>${esc(result.scoreLabel)}</span></p><p class="account-detail">${esc(result.detail)}</p><p class="account-note">${esc(result.note)}</p>${latest ? `<p class="account-tested">${esc(labels[latest.profile])} · ${esc(date(latest.startedAt))}</p>` : ''}</div>${quota ? `<div class="quota-windows">${quota}</div>` : ''}${unavailable || account.error || !quota ? `<p class="hint">${unavailable ? '额度不足，暂不能检测。' : ''}${esc(account.error || (!quota ? '额度暂未知' : ''))}</p>` : ''}<small>额度读取：${esc(date(account.readAt))}</small><div class="account-actions"><button type="button" class="text-button" data-account="${esc(account.id)}">选择此账号</button>${latest ? `<button type="button" class="text-button" data-view="${esc(latest.id)}">查看报告</button>` : ''}</div></article>`;
   }).join('') : '<p>Magpie 未返回 Codex 账号。请先在 Magpie 的 Codex provider 登录账号，然后刷新。</p>';
   controls();
 }
@@ -239,37 +236,39 @@ function renderReport(report) {
   $('empty-result').hidden = true;
   $('progress').hidden = true;
   $('report').hidden = false;
-  $('run-state').textContent = ({ completed: '已完成', incomplete: '未完整完成', cancelled: '已取消', running: '中间记录' })[report.runStatus] || report.runStatus;
+  $('run-state').textContent = ({ completed: '请求执行结束', incomplete: '提前结束', cancelled: '已取消', running: '中间记录' })[report.runStatus] || report.runStatus;
   const evaluation = report.kind === 'evaluation';
   const summary = report.summary;
   const title = evaluation ? report.verdict.label : report.fingerprint?.status === 'reported' ? '行为指纹采样完成' : '行为指纹有效样本不足';
   const reason = evaluation ? report.verdict.reason : '候选只表示数字输出与参考库的相似程度，不代表模型身份证明或降智概率。';
-  const stats = evaluation ? [[summary.usable ? `${summary.passed} / ${summary.usable}` : '—', '严格通过 / 可评分'], [String(summary.unscored), '未评分'], [`${(summary.elapsedMs / 1000).toFixed(1)}s`, '逐题耗时合计']]
+  const stats = evaluation ? [[`${summary.attempted} / ${summary.planned}`, '已执行 / 计划题数'], [summary.usable ? `${summary.passed} / ${summary.usable}` : '—', '严格通过 / 可评分'], [String(summary.unscored), `未评分（含未执行 ${Math.max(0, summary.planned - summary.attempted)} 题）`]]
     : [[`${report.fingerprint?.acceptedSamples || 0} / 3`, '有效样本'], [String(summary.attempted), '已发出请求'], [report.fingerprint?.score == null ? '—' : `${(report.fingerprint.score * 100).toFixed(1)}%`, '首位候选闭集权重']];
   const families = evaluation ? Object.entries(summary.families).map(([name, value]) => [familyNames[name] || name, `${value.passed} / ${value.total}`]) : (report.fingerprint?.candidates || []).slice(0, 3).map((item) => [item.model, `${(item.weight * 100).toFixed(1)}%`]);
-  const details = report.cases.map((item) => `<details class="case ${esc(item.status)}"><summary><span>${esc(item.id)}</span><span class="case-status">${esc(statuses[item.status] || item.status)} · ${((item.elapsedMs || 0) / 1000).toFixed(1)}s</span></summary><p>独立测试题</p><pre>${esc(item.prompt)}</pre>${item.expected === undefined ? '' : `<p>期望答案</p><pre>${esc(JSON.stringify(item.expected))}</pre>`}<p>模型最终回答</p><pre>${esc(item.text || item.error || '无最终回答')}</pre></details>`).join('');
+  const details = report.cases.map((item) => `<details class="case ${esc(item.status)}"><summary><span>${esc(item.id)}</span><span class="case-status">${esc(statuses[item.status] || item.status)} · ${((item.elapsedMs || 0) / 1000).toFixed(1)}s</span></summary><p>独立测试题</p><pre>${esc(item.prompt)}</pre>${item.expected === undefined ? '' : `<p>期望答案</p><pre>${esc(JSON.stringify(item.expected))}</pre>`}<p>模型最终回答</p><pre>${esc(item.text || item.error || '未取得最终答案')}</pre><p>请求诊断（已脱敏） · HTTP ${esc(item.httpStatus ?? '未知')} · 请求 ID：${esc(item.requestId || '未返回')}</p><pre>${esc(item.diagnostic ? JSON.stringify(item.diagnostic, null, 2) : '此历史记录未保存响应诊断。')}</pre></details>`).join('');
   $('report').innerHTML = `<div class="report-meta">${esc(report.config.target)} · ${esc(report.config.effort)} · ${esc(date(report.startedAt))}</div><h3 class="report-title">${esc(title)}</h3><p class="report-reason">${esc(reason)}</p>${report.persisted === false ? '<p class="unsaved">最终结果未能保存。请立即导出本轮报告，开始下一轮或关闭服务后将无法恢复这份完整结果。</p>' : ''}<div class="score-row">${stats.map(([value, label]) => `<div><strong>${esc(value)}</strong><small>${esc(label)}</small></div>`).join('')}</div><div class="families">${families.map(([name, value]) => `<div class="family">${esc(name)}<strong>${esc(value)}</strong></div>`).join('')}</div><div class="report-actions">${['html', 'json', 'md'].map((format) => `<a href="/api/runs/${encodeURIComponent(report.id)}/export?format=${format}" download>导出 ${format.toUpperCase()}</a>`).join('')}</div>${details}<details class="report-warnings"><summary>路由证据与检测说明</summary><p>通道证据${report.observed?.stable ? '一致' : '不完整或不一致'}；缺少 trace ${report.observed?.traceMissing || 0} 题，fallback ${report.observed?.fallbackCount || 0} 题。</p><ul>${(report.observed?.distinct || []).map((row) => `<li>${esc(row.model)} · ${esc(row.gatewayEffort)} · 上游自报 ${esc(row.vendorModel)}</li>`).join('')}${(report.warnings || []).map((warning) => `<li>${esc(warning)}</li>`).join('')}</ul><p>Run ID：${esc(report.id)}</p></details>`;
 }
 
-async function showRun(id) {
+async function showRun(id, reveal = false) {
   try {
     const report = await api(`/api/runs/${encodeURIComponent(id)}`);
-    viewedRun = isActive() && job.scope !== 'all' ? null : id;
+    viewedRun = id;
     renderReport(report);
     $('report').querySelector('.report-meta').prepend(`${accountName(report.config?.accountId, report.config?.accountHint)} · `);
     controls();
+    if (reveal) {
+      $('report').focus({ preventScroll: true });
+      $('report').scrollIntoView({ block: 'start' });
+    }
   }
   catch (error) { notice(error.message); }
 }
 
 function renderHistory() {
   const visible = runs.filter((run) => run.kind === 'unreadable' || run.config?.accountId === $('account').value);
-  for (const id of selected) { if (!visible.some((run) => run.id === id)) { selected.delete(id); } }
-  if (!visible.length) { $('history-body').innerHTML = '<tr><td colspan="6" class="empty-history">这个账号还没有检测记录。之前未固定账号的检测不能归到此账号。</td></tr>'; controls(); return; }
+  if (!visible.length) { $('history-body').innerHTML = '<tr><td colspan="5" class="empty-history">这个账号还没有检测记录。之前未固定账号的检测不能归到此账号。</td></tr>'; controls(); return; }
   $('history-body').innerHTML = visible.map((run) => {
-    const eligible = run.kind === 'evaluation' && run.profile === 'standard' && run.runStatus === 'completed' && run.summary.complete && run.observed?.stable;
     const result = run.kind === 'unreadable' ? run.error : run.kind === 'evaluation' ? `${scoreText(run)} · ${run.verdict.label}` : `${run.fingerprint?.acceptedSamples || 0}/3 有效样本`;
-    return `<tr><td><input type="checkbox" data-select="${esc(run.id)}" aria-label="选择 ${esc(run.id)} 作为基线" ${eligible ? '' : 'disabled'} ${selected.has(run.id) ? 'checked' : ''}></td><td>${esc(date(run.startedAt))}</td><td>${esc(run.config?.target || '—')}<small>${esc(run.config?.effort || '')}</small></td><td>${esc(labels[run.profile] || '记录异常')}</td><td>${esc(result)}</td><td>${run.kind === 'unreadable' ? '—' : `<button class="text-button" data-view="${esc(run.id)}">查看</button>`}</td></tr>`;
+    return `<tr><td>${esc(date(run.startedAt))}</td><td>${esc(run.config?.target || '—')}<small>${esc(run.config?.effort || '')}</small></td><td>${esc(labels[run.profile] || '记录异常')}</td><td>${esc(result)}</td><td>${run.kind === 'unreadable' ? '—' : `<button class="text-button" data-view="${esc(run.id)}">查看</button>`}</td></tr>`;
   }).join('');
   controls();
 }
@@ -337,7 +336,7 @@ $('run-form').addEventListener('submit', async (event) => {
   finally { submitting = false; controls(); }
 });
 $('batch-body').addEventListener('click', (event) => {
-  if (event.target.dataset.view) { showRun(event.target.dataset.view); }
+  if (event.target.dataset.view) { showRun(event.target.dataset.view, true); }
 });
 $('back-progress').addEventListener('click', () => { viewedRun = null; showProgress(); controls(); });
 $('cancel').addEventListener('click', async () => {
@@ -370,32 +369,18 @@ $('account-diagnostic-link').addEventListener('click', () => { $('account-diagno
 $('model').addEventListener('change', () => { efforts(); remember(); accountCards(); });
 $('effort').addEventListener('change', () => { remember(); accountCards(); });
 $('seed').addEventListener('change', () => { remember(); accountCards(); });
-$('account').addEventListener('change', () => { selected.clear(); remember(); renderHistory(); });
+$('account').addEventListener('change', () => { remember(); renderHistory(); });
 $('account-cards').addEventListener('click', (event) => {
-  if (event.target.dataset.view) { showRun(event.target.dataset.view); }
+  if (event.target.dataset.view) { showRun(event.target.dataset.view, true); }
   if (event.target.dataset.account && !isActive() && !submitting) {
     $('account').value = event.target.dataset.account;
-    selected.clear(); remember(); renderHistory();
+    remember(); renderHistory();
   }
 });
 document.querySelectorAll('input[name="profile"]').forEach((input) => input.addEventListener('change', () => { controls(); remember(); }));
-$('history-body').addEventListener('change', (event) => {
-  const id = event.target.dataset.select;
-  if (!id) { return; }
-  if (event.target.checked) { selected.add(id); } else { selected.delete(id); }
-  controls();
-});
 $('history-body').addEventListener('click', (event) => {
   const id = event.target.dataset.view;
-  if (id) { showRun(id); }
-});
-$('baseline').addEventListener('click', async () => {
-  try {
-    const result = await api('/api/baseline', { runIds: [...selected] });
-    selected.clear();
-    notice(result.message, true);
-    await history();
-  } catch (error) { notice(error.message); }
+  if (id) { showRun(id, true); }
 });
 
 function initAppearance() {
@@ -440,6 +425,7 @@ async function init() {
     await loadModels();
     await loadAccounts();
     await history();
+    if (state.baselineWarning) { notice(state.baselineWarning); }
   } catch (error) { notice(`检测服务暂不可用：${error.message}`); }
   async function poll() {
     try { await syncState(); }

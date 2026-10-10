@@ -6,6 +6,7 @@ import { fetchModels } from '../src/transport.mjs';
 import { runEvaluation, runFingerprint, getHistory, getRun, setBaseline, formatReport, formatHistory } from '../src/engine.mjs';
 import { renderHtml } from '../src/report.mjs';
 import { startDashboard, openBrowser } from '../src/web.mjs';
+import { initializeBaselines } from '../src/baselines.mjs';
 
 const help = `Codex Sentinel · 本地模型检测台
 
@@ -17,7 +18,8 @@ const help = `Codex Sentinel · 本地模型检测台
   fingerprint                    运行 3 次可选 ModelTrace 指纹采样
   history                        查看最近 20 轮本机记录
   show RUN_ID                    查看一轮完整报告（加 --json 看原始证据）
-  baseline ID1 ID2 ID3 [...]      选定至少 3 轮完整标准检测为固定参考
+  baseline                       从已有合格记录补建固定参考（不发送请求）
+  baseline ID1 ID2 ID3 [...]      维护用途：明确替换指定配置的固定参考
   export RUN_ID --out FILE        导出报告；--format html|json|md
 
 通用参数：
@@ -120,7 +122,14 @@ async function main() {
     } else if (args.command === 'history') {
       const rows = await getHistory(common); output(rows, formatHistory(rows));
     } else if (args.command === 'baseline') {
-      const result = await setBaseline({ ...common, runIds: args.positionals }); output(result, result.message);
+      if (args.positionals.length) {
+        const result = await setBaseline({ ...common, runIds: args.positionals }); output(result, result.message);
+      } else {
+        const config = normalizeOptions(common.options, { ...common, requireTarget: false });
+        const result = await initializeBaselines(config.dataDir);
+        output(result, `自动建立 ${result.created.length} 个固定参考；${result.errors.length} 个配置未能处理。已有参考保持不变。`);
+        if (result.errors.length) { process.exitCode = 1; }
+      }
     } else {
       const id = args.positionals[0]; if (!id || args.positionals.length !== 1) throw new Error('请提供一个完整的 run ID。');
       const report = await getRun({ ...common, id });

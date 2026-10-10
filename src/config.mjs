@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 
-export const VERSION = '0.2.1';
+export const VERSION = '0.3.0';
 export const REQUEST_VERSION = 'responses-isolated-v1';
 export const hash = (value) => createHash('sha256').update(String(value)).digest('hex');
 export const accountId = (baseUrl, account) => account ? hash(`${baseUrl}\ncodex\n${account.toLowerCase()}`).slice(0, 16) : null;

@@ -3,6 +3,7 @@ import { hash } from './config.mjs';
 export const ASSESSMENT_VERSION = 'reference-drop-v1';
 export const DROP_THRESHOLD = 0.20;
 export const FAMILY_DROP_THRESHOLD = 0.15;
+export const AUTO_BASELINE_RUNS = 3;
 const SCORED = new Set(['pass', 'wrong_answer', 'invalid_format']);
 
 export function summarize(cases, planned) {
@@ -83,15 +84,73 @@ function dropDetails(run, baseline) {
   return { drop, familyDrops, loweredFamilies, signal: drop + 1e-10 >= DROP_THRESHOLD && loweredFamilies >= 2 };
 }
 
+export function baselineCandidates(runs) {
+  const groups = new Map();
+  for (const run of [...runs].sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt) || a.id.localeCompare(b.id))) {
+    if (run.kind !== 'evaluation' || run.profile !== 'standard' || run.runStatus !== 'completed'
+      || !run.summary?.complete || !run.observed?.stable || run.persisted === false) { continue; }
+    const key = JSON.stringify([run.comparisonKey, run.observed.key, run.suiteVersion, run.cases.map((c) => c.id)]);
+    const group = groups.get(key) || [];
+    if (!group.some((r) => r.id === run.id)) { group.push(run); }
+    groups.set(key, group);
+  }
+  return [...groups.values()];
+}
+
+export function baselineCollectionVerdict(run, baseline, runs) {
+  if (baseline) {
+    if (baseline.assessmentVersion !== ASSESSMENT_VERSION) {
+      return { code: 'baseline_incompatible', label: '历史参考版本不一致', reason: '已保留原参考，请检查版本并通过维护命令明确重建。' };
+    }
+    const member = baseline.runIds.includes(run.id);
+    return { code: member ? 'baseline_established' : 'reference_ready',
+      label: member ? '历史参考已固定，本轮为参考样本' : '历史参考已就绪，本轮保留原始得分',
+      reason: `已固定 ${baseline.runIds.length} 轮标准检测的参考，平均通过率 ${(baseline.mean * 100).toFixed(1)}%。${member ? '参考样本不与自身比较' : '这份历史报告不追溯判定下降'}；后续相同配置的标准检测将自动比较。` };
+  }
+  const groups = baselineCandidates(runs).filter((group) => group[0].comparisonKey === run.comparisonKey);
+  const matching = groups.find((group) => group[0].observed.key === run.observed.key
+    && group[0].suiteVersion === run.suiteVersion
+    && JSON.stringify(group[0].cases.map((c) => c.id)) === JSON.stringify(run.cases.map((c) => c.id)));
+  const collected = Math.min(matching?.length || 0, AUTO_BASELINE_RUNS);
+  return { code: 'no_baseline', label: `正在建立历史参考 · ${collected}/${AUTO_BASELINE_RUNS} 轮`,
+    reason: collected < AUTO_BASELINE_RUNS
+      ? `已收集 ${collected}/${AUTO_BASELINE_RUNS} 轮同配置、同实际通道的完整标准检测，再完成 ${AUTO_BASELINE_RUNS - collected} 轮后自动固定参考，无需手动选择。`
+      : '合格记录已足够，等待自动保存参考。若持续显示此状态，请检查服务日志和数据目录写入权限。' };
+}
+
+export function incompleteVerdict(run) {
+  const s = run.summary;
+  const errors = s.errors || {};
+  const names = { empty_output: '未取得最终答案', timeout: '单题超时', run_timeout: '整轮超时', rate_limited: '限流 / 额度不足',
+    auth_error: '认证 / 权限失败', refusal: '拒答', tool_contaminated: '出现工具调用', truncated: '输出截断',
+    incomplete_stream: '响应流未完成', protocol_error: '响应格式异常', upstream_error: '上游失败',
+    network_error: '网络错误', response_too_large: '响应超限', cancelled: '已取消', http_error: 'HTTP 错误' };
+  const http = [...new Set((run.cases || []).filter((c) => c.status === 'http_error').map((c) => c.httpStatus).filter(Number.isInteger))];
+  if (http.length) { names.http_error = `HTTP ${http.join(' / ')}`; }
+  const causes = Object.entries(errors).map(([code, count]) => `${count} 题${names[code] || code}`);
+  const failed = Object.values(errors).reduce((sum, count) => sum + count, 0);
+  const unattempted = Math.max(0, s.planned - s.attempted);
+  const accountUnavailable = run.cases?.some((c) => c.diagnostic?.cause === 'account_unavailable');
+  let label = run.runStatus === 'cancelled' ? '检测已取消'
+    : accountUnavailable ? '请求失败：指定账号无法服务所选模型'
+      : !s.usable && http.length ? `请求失败：HTTP ${http.join(' / ')}`
+        : run.runStatus === 'completed' && errors.empty_output === failed ? `检测结束，${failed} 题未取得最终答案`
+          : `检测${run.runStatus === 'completed' ? '结束，评分不完整' : '提前结束'}${causes.length ? `：${causes.join('；')}` : ''}`;
+  if (run.runStatus === 'running') { label = '检测尚未完成，仅有中间记录'; }
+  return { code: 'incomplete', label,
+    reason: `已执行 ${s.attempted}/${s.planned} 题，可评分 ${s.usable} 题，其中 ${s.passed} 题通过。${causes.length ? `${causes.join('；')}。` : ''}${unattempted ? `${unattempted} 题未执行。` : ''}本轮结果不足以比较能力变化；未评分项不计作答错。${run.stop?.reason || (accountUnavailable ? '请检查账号与模型的对应关系。' : '可展开异常题目查看诊断。')}` };
+}
+
 export function assessRun(run, baseline, priorRuns = []) {
   if (run.runStatus !== 'completed' || !run.summary.complete) {
-    return { code: 'incomplete', label: '运行不完整，无法判断能力变化', reason: '取消、超时、限流、认证失败、拒答、工具调用或未完成输出单列；已完成题可查看，但本轮不作能力下降判定。' };
+    return incompleteVerdict(run);
   }
   if (run.profile === 'quick') return { code: 'quick_only', label: '快速初筛完成，尚不足以判断退化', reason: '6 道小题仅显示本轮表现。请用同配置标准检测建立参考和复测。' };
   if (!run.observed.stable) return { code: 'route_unverified', label: '实际通道不一致或证据不足', reason: '路由头、实际 effort 或 trace 不完整，或测试中发生 fallback；本轮只展示得分，不作基线下降判断。' };
-  if (!baseline) return { code: 'no_baseline', label: '本轮检测完成，尚无同配置基线', reason: '先完成至少 3 轮标准检测，再明确选择这些 run ID 建立本机参考。' };
+  if (!baseline) { return baselineCollectionVerdict(run, null, [...priorRuns.filter((r) => r.id !== run.id), run]); }
   if (baseline.assessmentVersion !== ASSESSMENT_VERSION) return { code: 'baseline_incompatible', label: '基线判定版本不一致', reason: '请用当前版本重新建立参考。' };
   if (baseline.observedKey !== run.observed.key) return { code: 'route_changed', label: '实际模型或档位已变化', reason: '当前路由身份与基线不同，不能把配置变化解释为原模型能力下降。' };
+  if (baseline.runIds.includes(run.id)) { return baselineCollectionVerdict(run, baseline, priorRuns); }
   const details = dropDetails(run, baseline);
   const prior = priorRuns.filter((r) => r.id !== run.id && r.kind === 'evaluation' && r.comparisonKey === run.comparisonKey && Date.parse(r.startedAt) >= Date.parse(baseline.createdAt))
     .sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt))[0];
