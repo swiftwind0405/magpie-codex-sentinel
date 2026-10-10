@@ -32,6 +32,17 @@
     <section id="accounts" class="account-overview" aria-labelledby="accounts-title">
       <div class="section-heading"><div><div class="heading-title"><h2 id="accounts-title">Codex 账号</h2><span id="account-count" class="badge">读取中</span></div><p>能力结论按当前模型、推理强度和题目种子汇总，额度单独显示。</p></div><button id="refresh-accounts" class="text-button" type="button"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2v3h-3"/></svg>刷新账号</button></div>
       <div id="account-cards" class="account-cards"><p>正在读取 Magpie 账号…</p></div>
+      <details id="account-diagnostics" class="account-diagnostics" hidden>
+        <summary>账号读取排查信息</summary>
+        <p class="hint">复制或下载后发给维护者。仅包含版本、运行环境、连接类型、状态码和耗时；不包含密钥、账号名称、完整地址或原始响应。导出不会发送测试题。</p>
+        <div class="diagnostic-actions">
+          <button id="copy-diagnostic" class="secondary" type="button">复制诊断信息</button>
+          <button id="download-diagnostic" class="secondary" type="button">下载诊断文件</button>
+        </div>
+        <p id="diagnostic-status" class="hint" role="status"></p>
+        <label class="sr-only" for="diagnostic-content">可分享的账号读取诊断信息</label>
+        <textarea id="diagnostic-content" readonly rows="12" spellcheck="false"></textarea>
+      </details>
     </section>
     <div id="workspace" class="workspace" tabindex="-1">
       <section class="panel setup" aria-labelledby="setup-title">
@@ -40,6 +51,7 @@
           <fieldset id="run-fields">
             <label class="field-label" for="account">检测账号</label>
             <select id="account" name="account" required><option value="">正在读取账号…</option></select>
+            <a id="account-diagnostic-link" href="#account-diagnostics" hidden>读取失败？查看排查信息</a>
             <p class="hint">严格固定此账号。不可用时停止，不切换到其他账号。</p>
             <label class="field-label" for="model">目标模型</label>
             <select id="model" name="model" required><option value="">正在读取模型…</option></select>

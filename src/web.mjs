@@ -177,8 +177,22 @@ export async function startDashboard({ options = {}, directory, apiKey, port = 4
       return;
     }
     if (request.method === 'GET' && path === '/api/accounts') {
-      try { send(response, 200, { accounts: await fetchAccounts(config) }); }
-      catch (error) { throw failure(502, cleanError(error)); }
+      const gateway = new URL(config.baseUrl);
+      const diagnostic = {
+        schemaVersion: 1, capturedAt: new Date().toISOString(), sentinelVersion: VERSION,
+        runtime: { name: process.versions.bun ? 'bun' : 'node', version: process.versions.bun || process.versions.node, platform: process.platform, arch: process.arch },
+        mode: mode === 'plugin' ? 'plugin' : 'cli', access: access.remote ? 'remote' : 'local',
+        gateway: { protocol: gateway.protocol, hostType: ['127.0.0.1', 'localhost', '[::1]'].includes(gateway.hostname) ? 'loopback' : 'remote',
+          port: gateway.port || (gateway.protocol === 'https:' ? '443' : '80'), basePath: gateway.pathname === '/v1' ? '/v1' : '[hidden]/v1' },
+        steps: [],
+      };
+      try {
+        const accounts = await fetchAccounts(config, { diagnostics: diagnostic.steps });
+        diagnostic.accountCount = accounts.length;
+        send(response, 200, { accounts, diagnostic });
+      } catch (error) {
+        send(response, 502, { error: cleanError(error), diagnostic });
+      }
       return;
     }
     if (request.method === 'GET' && path === '/api/history') {

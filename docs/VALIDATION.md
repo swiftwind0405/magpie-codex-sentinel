@@ -128,3 +128,13 @@ HTTP fixture 控制外部网关，验证本插件行为，不代表真实模型�
 - 实际停用插件后端口关闭，重新启用后页面和账号列表恢复；`plugin-providers.json` 仍为空数组。
 - 当前 `npm pack` 分发包用 Magpie 自带 Bun 1.4.2 和 `host-c2755a32f702.js` 加载通过；provider 列表为空，3 项静态资源与包内一致，宿主关闭后端口释放。隔离网关记录到加载及静态资源检查期间 0 次请求，这不代表真实账号列表读取不访问网关。
 - 本次未修改产品代码，未发起真实付费推理；检测执行逻辑沿用此前有效测试证据，不据此声称所有 Magpie 功能或新一轮真实检测已验收。截图 `sentinel-local-acceptance.png` 随本次聊天交付。
+
+## 账号读取诊断（2026-10-10，当前源码）
+
+- 新增真实 HTTP 故障场景覆盖账号读取的版本检查与额度列表：401/403、404、429、HTML、无效 JSON 结构、旧版本、响应超限、连接断开和实际 5 秒超时；成功和空列表也有诊断。断言保留失败步骤、状态、耗时，不导出 fixture 密钥、邮箱或原始响应，不发起模型推理。可单独运行 `node --test --test-name-pattern='account diagnostics' test/engine.test.mjs`。
+- Node 全量测试 54 项通过；`npm run check`、`node --check src/transport.mjs`、`git diff --check` 通过。
+- 实际浏览器加载本地 Sentinel 和故障网关：账号 HTTP 403 时诊断自动展开、检测按钮禁用；点击复制后实际粘贴得到诊断内容，下载 JSON 的浏览器 502 / 网关 403 与 `auth_error` 字段一致，文件不含 fixture 敏感数据。390px 和桌面布局可用，窄屏没有横向溢出。
+- 慢网关版本响应约 3 秒、账号响应约 13 秒，浏览器实测总计 16017ms 后成功得到 HTTP 200 和空账号列表；诊断分别记录两步耗时。浏览器账号读取及启动检测请求等待上限现为 25 秒，覆盖服务端账号发现的 5 + 15 秒预算。
+- 本地代理将账号响应替换为 HTTP 502 HTML 时，页面仍可导出 `browser.code: non_json_response`、HTTP 502、`service: null`，未伪造服务端诊断。
+- Bun 1.3.5 单独真实 HTTP 调用 `fetchAccounts`：成功与 HTTP 403 分类、诊断敏感数据排除均通过。但 `bun test` 运行新增场景时，断言通过后测试清理报 `ERR_SERVER_NOT_RUNNING`，因此 Bun 测试套件不计为通过；未据此修改现有关闭逻辑，也未重新验收实际 Magpie Bun 宿主。
+- 本次未发布、部署或调用真实模型；未复现截图提供者的环境。浏览器拒绝剪贴板权限时的手动复制分支尚未实测；DNS/TLS 分类未连接真实故障主机验证。

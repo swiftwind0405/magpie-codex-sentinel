@@ -243,29 +243,78 @@ export async function fetchModels(config, { signal, fetchImpl = fetch } = {}) {
   return data.data;
 }
 
+// Only fixed labels and selected metadata enter the shareable discovery trace.
+// Never copy response bodies, request headers, URLs or native error messages.
+async function accountDiscoveryStep(config, fetchImpl, steps, { stage, suffix, timeoutMs, maxBytes }, inspect) {
+  const step = { stage, endpoint: suffix || '/', timeoutMs, startedAt: new Date().toISOString(), httpStatus: null, responseType: null };
+  steps.push(step);
+  const started = Date.now();
+  const signal = AbortSignal.timeout(timeoutMs);
+  const label = stage === 'gateway_info' ? '读取 Magpie 版本' : '读取 Codex 账号';
+  try {
+    const response = await fetchImpl(`${config.baseUrl}${suffix}`, { headers: authHeaders(config), signal, redirect: 'error' });
+    step.httpStatus = response.status;
+    const type = response.headers.get('content-type') || '';
+    step.responseType = type.includes('json') ? 'json' : type.includes('html') ? 'html' : type ? 'other' : 'missing';
+    if (!response.ok) {
+      await response.body?.cancel();
+      const classification = failureCode(response.status);
+      throw new ProbeError(classification === 'upstream_error' ? 'http_error' : classification,
+        `${label}失败（HTTP ${response.status}）。${response.status === 401 || response.status === 403 ? '请检查 Magpie 网关密钥和访问权限。' : '请检查网关地址及反向代理配置。'}`);
+    }
+    const text = await limitedText(response, maxBytes);
+    let data;
+    try { data = JSON.parse(text); }
+    catch { throw new ProbeError('invalid_json', `${label}失败：网关未返回有效 JSON，请检查地址和反向代理是否返回了网页。`); }
+    const result = inspect(data, step);
+    step.code = 'ok';
+    return result;
+  } catch (error) {
+    let safeError = error;
+    if (!(error instanceof ProbeError)) {
+      const causes = [error, error?.cause, ...(error?.cause?.errors || [])];
+      const networkCode = causes.map((cause) => cause?.code).find((code) => [
+        'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ETIMEDOUT',
+        'CERT_HAS_EXPIRED', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+        'ERR_TLS_CERT_ALTNAME_INVALID', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET',
+      ].includes(code));
+      if (networkCode) { step.networkCode = networkCode; }
+      const timeout = signal.aborted || error?.name === 'TimeoutError' || ['ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT'].includes(networkCode);
+      safeError = new ProbeError(timeout ? 'timeout' : 'network_error',
+        `${label}失败：${timeout ? '请求超时，请检查网关响应和网络连接。' : '无法连接网关，请检查 Magpie 是否运行、端口、DNS 和 TLS 配置。'}`);
+    }
+    if (safeError.code === 'response_too_large') {
+      safeError = new ProbeError('response_too_large', `${label}失败：响应超过大小上限。`);
+    }
+    step.code = safeError.code;
+    throw safeError;
+  } finally { step.elapsedMs = Date.now() - started; }
+}
+
 /** Magpie's public quota snapshot contains account names, never login tokens. */
-export async function fetchAccounts(config, { fetchImpl = fetch } = {}) {
+export async function fetchAccounts(config, { fetchImpl = fetch, diagnostics = [] } = {}) {
   // An old gateway may silently ignore an unknown pin header. Fail closed at
   // the oldest release whose strict pin contract this plugin has verified.
-  const infoResponse = await fetchImpl(config.baseUrl, { headers: authHeaders(config), signal: AbortSignal.timeout(5000), redirect: 'error' });
-  if (!infoResponse.ok) {
-    await infoResponse.body?.cancel();
-    throw new Error('无法确认 Magpie 版本，已禁止账号检测。');
-  }
-  const info = JSON.parse(await limitedText(infoResponse, 128 * 1024));
-  const match = /^v?(\d+)\.(\d+)\.(\d+)(?:$|[-+])/.exec(info.version || '');
-  // v0.1.1111 contains the strict-pin implementation and its no-fallback tests.
-  const supported = match && (Number(match[1]) > 0 || Number(match[2]) > 1 || (Number(match[2]) === 1 && Number(match[3]) >= 1111));
-  if (info.name !== 'magpie' || !supported) { throw new Error(`账号检测需要 Magpie 0.1.1111 或更高版本，以保证严格固定账号；当前网关报告 ${String(info.version || '未知版本').slice(0, 80)}。`); }
-  const response = await fetchImpl(`${config.baseUrl}/magpie/quotas`, {
-    headers: authHeaders(config), signal: AbortSignal.timeout(15000), redirect: 'error',
+  await accountDiscoveryStep(config, fetchImpl, diagnostics, {
+    stage: 'gateway_info', suffix: '', timeoutMs: 5000, maxBytes: 128 * 1024,
+  }, (info, step) => {
+    const match = typeof info?.version === 'string' && /^v?(\d{1,8})\.(\d{1,8})\.(\d{1,8})(?:$|[-+])/.exec(info.version);
+    step.gatewayVersion = match ? match.slice(1, 4).join('.') : null;
+    step.minimumVersion = '0.1.1111';
+    if (info?.name !== 'magpie') { throw new ProbeError('invalid_gateway', '读取 Magpie 版本失败：响应不是 Magpie 服务信息，请检查网关地址。'); }
+    // v0.1.1111 contains the strict-pin implementation and its no-fallback tests.
+    const supported = match && (Number(match[1]) > 0 || Number(match[2]) > 1 || (Number(match[2]) === 1 && Number(match[3]) >= 1111));
+    if (!supported) { throw new ProbeError('unsupported_version', `账号检测需要 Magpie ${step.minimumVersion} 或更高版本，以保证严格固定账号；当前网关报告 ${step.gatewayVersion || '未知版本'}。`); }
   });
-  if (!response.ok) {
-    await response.body?.cancel();
-    throw new Error(`读取 Codex 账号失败（HTTP ${response.status}）。`);
-  }
-  const data = JSON.parse(await limitedText(response, 4 * 1024 * 1024));
-  if (!Array.isArray(data.data)) { throw new Error('Magpie 账号列表格式无效。'); }
+  const data = await accountDiscoveryStep(config, fetchImpl, diagnostics, {
+    stage: 'accounts', suffix: '/magpie/quotas', timeoutMs: 15000, maxBytes: 4 * 1024 * 1024,
+  }, (data) => {
+    if (!Array.isArray(data?.data) || data.data.some((row) => !row || typeof row !== 'object' || Array.isArray(row)
+      || (row.provider === 'codex' && Array.isArray(row.windows) && row.windows.some((window) => !window || typeof window !== 'object' || Array.isArray(window))))) {
+      throw new ProbeError('invalid_accounts', '读取 Codex 账号失败：Magpie 账号列表格式无效。');
+    }
+    return data;
+  });
   const accounts = data.data.filter((row) => row.provider === 'codex' && typeof row.user === 'string' && row.user.trim());
   return accounts.map((row) => ({
     id: accountId(config.baseUrl, row.user), name: row.user, plan: row.plan || '',

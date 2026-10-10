@@ -266,6 +266,32 @@ effort 接受的配置名称包含 none、minimal、low、medium、high、xhigh�
 
 ## 8. 常见问题
 
+### 账号读取失败时，如何反馈
+
+当前源码在账号区域提供「账号读取排查信息」（尚未包含在 v0.2.1 发布包中）。读取失败时自动展开，也可点击检测账号下方的「读取失败？查看排查信息」。
+
+1. 出错后点击「复制诊断信息」，或下载 `sentinel-account-diagnostic.json`，发给维护者。浏览器不允许自动复制时，可手动复制已选中的内容。
+2. 同时说明使用插件、CLI 还是 Docker，以及出错前的操作。可以附上错误提示截图，无需提供密钥或完整账号列表。
+3. 先保存失败信息，再尝试「刷新账号」；刷新会替换当前诊断。诊断只保留在当前页面，刷新整页后会重新采集。
+
+诊断包含 Sentinel 版本、Node/Bun 版本、系统类型、网关连接类型及端口、读取时间、失败步骤、HTTP 状态、耗时和已知网络错误码。远程主机名、自定义路径、账号名称、密钥、Cookie、原始响应与本机文件路径不进入诊断。复制和下载不额外请求网关，也不发送模型测试题。
+
+维护者可先看 `browser`（浏览器到 Sentinel）和 `service.steps`（Sentinel 到 Magpie）：
+
+| 诊断结果 | 排查方向 |
+| --- | --- |
+| `gateway_info` / `unsupported_version` | 对照 `gatewayVersion` 和 `minimumVersion`，升级 Magpie 后重试；不绕过严格固定账号检查 |
+| `gateway_info` / `invalid_gateway` | 当前地址返回的不是 Magpie 服务信息，检查网关地址与代理路由 |
+| HTTP 401 / 403 | 检查 Magpie 网关密钥和访问权限；与 Sentinel 网页登录密码区分 |
+| HTTP 404、`invalid_json`，或 `responseType: html` | 检查是否指向错误端口、网页入口或代理错误页 |
+| `network_error` / `ECONNREFUSED` | 检查 Magpie 进程和网关端口；Docker 内的 loopback 指向容器自身 |
+| `network_error` / DNS、TLS 错误码 | 检查服务所在机器的域名解析、证书和网络 |
+| `timeout` | 按失败步骤检查响应速度；版本请求上限 5 秒，账号请求上限 15 秒，浏览器等待账号接口 25 秒 |
+| 两步 `ok`，但 `accountCount: 0` | 网关可读取，但未返回 Codex 账号；检查 Codex provider 是否已登录 |
+| `service: null` | 未取得服务端诊断，先看浏览器状态码、超时或非 JSON 分类，再检查 Sentinel / 反向代理日志 |
+
+尚无诊断入口的旧版：先看页面上方的具体错误；也可以打开浏览器开发者工具的 Network，刷新账号，查看 `/api/accounts` 的状态码和响应中的 `error`。不要直接分享完整 HAR、Cookie 或请求头。
+
 | 现象 | 处理方式 |
 | --- | --- |
 | 没有 target，或提示模型不存在 | 在网页刷新模型列表并重新选择；CLI 使用 models 返回的完整 ID |

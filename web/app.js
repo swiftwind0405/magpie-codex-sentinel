@@ -7,6 +7,7 @@ let models = [];
 let accounts = [];
 let accountsError = '';
 let accountsLoading = true;
+let accountDiagnostic = null;
 let runs = [];
 let job = null;
 let seenJob = null;
@@ -26,16 +27,44 @@ function notice(message, success = false) {
 }
 
 async function api(path, body) {
-  const response = await fetch(path, body === undefined ? { cache: 'no-store', signal: AbortSignal.timeout(15000) } : {
-    method: 'POST', headers: { 'content-type': 'application/json', 'x-sentinel-request': '1' }, body: JSON.stringify(body), signal: AbortSignal.timeout(15000),
-  });
-  if (response.status === 401) { location.replace('/login'); }
-  if (!response.headers.get('content-type')?.includes('application/json')) {
-    throw new Error(`检测服务或反向代理返回 HTTP ${response.status}，未返回有效数据。请检查服务日志后刷新。`);
+  // Account discovery has sequential 5s + 15s gateway budgets.
+  const timeoutMs = ['/api/accounts', '/api/runs'].includes(path) ? 25000 : 15000;
+  const started = Date.now();
+  const clientDiagnostic = { capturedAt: new Date().toISOString(), endpoint: path, timeoutMs, httpStatus: null, code: 'network_error' };
+  let result;
+  try {
+    const response = await fetch(path, body === undefined ? { cache: 'no-store', signal: AbortSignal.timeout(timeoutMs) } : {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-sentinel-request': '1' }, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs),
+    });
+    clientDiagnostic.httpStatus = response.status;
+    if (response.status === 401) { location.replace('/login'); }
+    if (!response.headers.get('content-type')?.includes('application/json')) {
+      clientDiagnostic.code = 'non_json_response';
+      throw new Error(`检测服务或反向代理返回 HTTP ${response.status}，未返回有效数据。请检查服务日志后刷新。`);
+    }
+    clientDiagnostic.code = 'invalid_json';
+    result = await response.json();
+    if (!result || typeof result !== 'object' || Array.isArray(result)) { throw new Error('检测服务返回的数据格式无效。'); }
+    clientDiagnostic.code = response.ok ? 'ok' : 'http_error';
+    if (!response.ok) { throw new Error(result.error || '请求失败。'); }
+    return { ...result, clientDiagnostic };
+  } catch (error) {
+    if (error.name === 'TimeoutError') { clientDiagnostic.code = 'timeout'; }
+    error.clientDiagnostic = clientDiagnostic;
+    error.diagnostic = result?.diagnostic;
+    throw error;
+  } finally {
+    clientDiagnostic.elapsedMs = Date.now() - started;
   }
-  const result = await response.json();
-  if (!response.ok) { throw new Error(result.error || '请求失败。'); }
-  return result;
+}
+
+function showAccountDiagnostic(result, failed) {
+  accountDiagnostic = { schemaVersion: 1, browser: result.clientDiagnostic, service: result.diagnostic || null };
+  $('account-diagnostics').hidden = false;
+  $('account-diagnostics').open = failed;
+  $('account-diagnostic-link').hidden = !failed;
+  $('diagnostic-content').value = JSON.stringify(accountDiagnostic, null, 2);
+  $('diagnostic-status').textContent = failed ? '已保留本次失败信息，可复制或下载后发给维护者。' : '已记录本次账号读取结果。';
 }
 
 function controls() {
@@ -121,6 +150,7 @@ async function loadAccounts() {
   accountCards();
   try {
     const data = await api('/api/accounts');
+    showAccountDiagnostic(data, false);
     accounts = [...new Map(data.accounts.map((account) => [account.id, account])).values()];
     let saved = {};
     try { saved = JSON.parse(localStorage.getItem('sentinel-selection')) || {}; } catch { /* Use defaults. */ }
@@ -130,10 +160,13 @@ async function loadAccounts() {
     if (!accounts.length) { $('account').add(new Option('暂无 Codex 账号', '')); }
     renderHistory();
   } catch (error) {
+    showAccountDiagnostic(error, true);
     accounts = [];
-    accountsError = error.message;
+    accountsError = error.clientDiagnostic?.code === 'timeout' ? '读取账号超时，请展开排查信息并发给维护者。'
+      : error.clientDiagnostic?.code === 'network_error' ? '浏览器无法连接检测服务，请确认服务仍在运行。'
+      : error.message;
     $('account').replaceChildren(new Option('账号读取失败，请刷新', ''));
-    notice(error.message);
+    notice(accountsError);
   }
   accountsLoading = false;
   accountCards();
@@ -313,6 +346,27 @@ $('cancel').addEventListener('click', async () => {
 });
 $('refresh-models').addEventListener('click', () => { notice(''); loadModels(); });
 $('refresh-accounts').addEventListener('click', () => { notice(''); loadAccounts(); });
+$('copy-diagnostic').addEventListener('click', async () => {
+  const text = $('diagnostic-content').value;
+  try {
+    await navigator.clipboard.writeText(text);
+    $('diagnostic-status').textContent = '已复制，请发给维护者。';
+  } catch {
+    $('diagnostic-content').focus();
+    $('diagnostic-content').select();
+    $('diagnostic-status').textContent = '浏览器未允许自动复制，已选中内容。请手动复制或下载诊断文件。';
+  }
+});
+$('download-diagnostic').addEventListener('click', () => {
+  if (!accountDiagnostic) { return; }
+  const url = URL.createObjectURL(new Blob([JSON.stringify(accountDiagnostic, null, 2) + '\n'], { type: 'application/json' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'sentinel-account-diagnostic.json';
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
+$('account-diagnostic-link').addEventListener('click', () => { $('account-diagnostics').open = true; });
 $('model').addEventListener('change', () => { efforts(); remember(); accountCards(); });
 $('effort').addEventListener('change', () => { remember(); accountCards(); });
 $('seed').addEventListener('change', () => { remember(); accountCards(); });

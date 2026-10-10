@@ -34,6 +34,13 @@ async function fixture(t) {
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url, 'http://127.0.0.1');
+      if (state.discoveryFailure?.path === url.pathname) {
+        if (state.discoveryFailure.hang) { return; }
+        if (state.discoveryFailure.disconnect) { response.destroy(); return; }
+        const { status, type = 'application/json', body } = state.discoveryFailure;
+        response.writeHead(status, { 'content-type': type });
+        response.end(body); return;
+      }
       if (url.pathname === '/v1') {
         response.setHeader('content-type', 'application/json');
         response.end(JSON.stringify({ name: 'magpie', version: state.gatewayVersion })); return;
@@ -546,6 +553,74 @@ test('all-account run rejects empty, duplicate and changed lists before any prob
   assert.equal((await d.request('/api/runs', { target: model, profile: 'quick', accountIds: ids })).status, 400);
   f.state.accounts = [];
   assert.equal((await d.request('/api/runs', { target: model, profile: 'quick', accountIds: [] })).status, 400);
+  assert.equal(f.state.calls.length, 0);
+});
+
+test('account diagnostics identify the failed discovery step without exporting upstream secrets or making probes', async (t) => {
+  const f = await fixture(t);
+  const d = await dashboard(t, f);
+  const privateText = 'private@example.test fixture-secret-never-persist /home/private/config token=secret';
+  for (const scenario of [
+    { path: '/v1', status: 401, body: privateText, stage: 'gateway_info', code: 'auth_error' },
+    { path: '/v1/magpie/quotas', status: 403, body: privateText, stage: 'accounts', code: 'auth_error' },
+    { path: '/v1/magpie/quotas', status: 404, body: privateText, stage: 'accounts', code: 'http_error' },
+    { path: '/v1/magpie/quotas', status: 429, body: privateText, stage: 'accounts', code: 'rate_limited' },
+    { path: '/v1', status: 200, type: 'text/html', body: `<html>${privateText}</html>`, stage: 'gateway_info', code: 'invalid_json' },
+    { path: '/v1', status: 200, body: 'null', stage: 'gateway_info', code: 'invalid_gateway' },
+    { path: '/v1', status: 200, body: JSON.stringify({ name: 'magpie', version: privateText }), stage: 'gateway_info', code: 'unsupported_version' },
+    { path: '/v1', status: 200, body: privateText.repeat(5000), stage: 'gateway_info', code: 'response_too_large' },
+    { path: '/v1/magpie/quotas', status: 200, body: JSON.stringify({ error: privateText }), stage: 'accounts', code: 'invalid_accounts' },
+    { path: '/v1/magpie/quotas', status: 200, body: JSON.stringify({ data: [{ provider: 'codex', user: privateText, windows: [null] }] }), stage: 'accounts', code: 'invalid_accounts' },
+  ]) {
+    f.state.discoveryFailure = scenario;
+    const response = await d.request('/api/accounts');
+    assert.equal(response.status, 502);
+    const result = await response.json();
+    assert.ok(result.diagnostic, 'Account failures must include a shareable diagnostic');
+    const step = result.diagnostic.steps.at(-1);
+    assert.equal(step.stage, scenario.stage);
+    assert.equal(step.code, scenario.code);
+    assert.equal(step.httpStatus, scenario.status);
+    assert.ok(step.elapsedMs >= 0);
+    assert.match(result.error, new RegExp(scenario.stage === 'gateway_info' ? '版本' : '账号'));
+    assert.doesNotMatch(JSON.stringify(result), /private@example|fixture-secret|\/home\/private|token=secret/);
+  }
+  f.state.discoveryFailure = null;
+  f.state.gatewayVersion = '0.1.1000';
+  const old = await (await d.request('/api/accounts')).json();
+  assert.equal(old.diagnostic.steps.length, 1);
+  assert.equal(old.diagnostic.steps[0].code, 'unsupported_version');
+  assert.equal(old.diagnostic.steps[0].gatewayVersion, '0.1.1000');
+  f.state.gatewayVersion = '0.1.1132';
+  for (const empty of [false, true]) {
+    if (empty) { f.state.accounts = []; }
+    const response = await d.request('/api/accounts');
+    assert.equal(response.status, 200);
+    const result = await response.json();
+    assert.equal(result.diagnostic.accountCount, empty ? 0 : 2);
+    assert.deepEqual(result.diagnostic.steps.map((step) => step.code), ['ok', 'ok']);
+    assert.doesNotMatch(JSON.stringify(result.diagnostic), /private@example|fixture-secret/);
+  }
+  assert.equal(f.state.calls.length, 0, 'Account discovery and diagnostic collection must not run inference');
+});
+
+test('account diagnostics capture real network disconnects and the gateway version timeout', async (t) => {
+  const f = await fixture(t);
+  const d = await dashboard(t, f);
+  for (const failure of [{ disconnect: true, code: 'network_error' }, { hang: true, code: 'timeout' }]) {
+    f.state.discoveryFailure = { path: '/v1', ...failure };
+    const response = await d.request('/api/accounts');
+    assert.equal(response.status, 502);
+    const result = await response.json();
+    assert.equal(result.diagnostic.steps.length, 1);
+    const step = result.diagnostic.steps[0];
+    assert.equal(step.stage, 'gateway_info');
+    assert.equal(step.code, failure.code);
+    assert.equal(step.httpStatus, null);
+    assert.equal(step.timeoutMs, 5000);
+    assert.ok(step.elapsedMs >= 0);
+    assert.match(result.error, /读取 Magpie 版本失败/);
+  }
   assert.equal(f.state.calls.length, 0);
 });
 
